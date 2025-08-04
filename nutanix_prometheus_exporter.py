@@ -598,8 +598,9 @@ class NutanixMetrics:
                 layer2_stretch_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_layer2_stretches',limit=limit,module_entity_api='Layer2StretchesApi')
                 self.__dict__["nutanix_count_layer2_stretch"].labels(entity=prism_central_hostname).set(len(layer2_stretch_list))
 
-                load_balancer_sessions_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_load_balancer_sessions',limit=limit,module_entity_api='LoadBalancerSessionsApi')
-                self.__dict__["nutanix_count_load_balancer_session"].labels(entity=prism_central_hostname).set(len(load_balancer_sessions_list))
+                #! this is causing too much latency, so removing it for now
+                """ load_balancer_sessions_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_load_balancer_sessions',limit=limit,module_entity_api='LoadBalancerSessionsApi')
+                self.__dict__["nutanix_count_load_balancer_session"].labels(entity=prism_central_hostname).set(len(load_balancer_sessions_list)) """
 
                 traffic_mirrors_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_traffic_mirrors',limit=limit,module_entity_api='TrafficMirrorsApi')
                 self.__dict__["nutanix_count_traffic_mirror"].labels(entity=prism_central_hostname).set(len(traffic_mirrors_list))
@@ -723,7 +724,11 @@ class NutanixMetrics:
             dataprotection_api = ntnx_dataprotection_py_client.ProtectedResourcesApi(api_client=dataprotection_client)
             entity_list=[]
             error_list=[]
-            if len(nutanix_dr_protected_vm_list) >0:
+
+
+            #todo: replace with policy schedule lookup for now
+            #! this has issues (latency) and this code needs to call this endpoint only for non-async entities
+            """ if len(nutanix_dr_protected_vm_list) >0:
                 with tqdm.tqdm(total=len(nutanix_dr_protected_vm_list), desc=f"{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching protected resources state") as progress_bar:
                     with ThreadPoolExecutor(max_workers=10) as executor:
                         futures = [executor.submit(
@@ -755,8 +760,25 @@ class NutanixMetrics:
                 #print([protected_resource.replication_states for protected_resource in protected_resource_list])
                 self.__dict__["nutanix_count_dr_protected_entities_status_in_sync"].labels(entity=prism_central_hostname).set(sum([len([replication_state for replication_state in protected_resource.replication_states if replication_state.replication_status == 'IN_SYNC']) for protected_resource in protected_resource_list if protected_resource.replication_states]))
                 self.__dict__["nutanix_count_dr_protected_entities_status_syncing"].labels(entity=prism_central_hostname).set(sum([len([replication_state for replication_state in protected_resource.replication_states if replication_state.replication_status == 'SYNCING']) for protected_resource in protected_resource_list if protected_resource.replication_states]))
-                self.__dict__["nutanix_count_dr_protected_entities_status_out_of_sync"].labels(entity=prism_central_hostname).set(sum([len([replication_state for replication_state in protected_resource.replication_states if replication_state.replication_status == 'OUT_OF_SYNC']) for protected_resource in protected_resource_list if protected_resource.replication_states]))
-            
+                self.__dict__["nutanix_count_dr_protected_entities_status_out_of_sync"].labels(entity=prism_central_hostname).set(sum([len([replication_state for replication_state in protected_resource.replication_states if replication_state.replication_status == 'OUT_OF_SYNC']) for protected_resource in protected_resource_list if protected_resource.replication_states])) """
+
+            dr_protected_entities_sync=0
+            dr_protected_entities_nearsync=0
+            dr_protected_entities_async=0
+            for entity in nutanix_dr_protected_vm_list:
+                entity_protection_policy_ext_id = entity.protection_policy_state.policy.ext_id
+                entity_protection_policy = next((protection_policy for protection_policy in protection_policy_list if protection_policy.ext_id == entity_protection_policy_ext_id), None)
+                if entity_protection_policy.replication_configurations[0].schedule.recovery_point_objective_time_seconds == 0:
+                    dr_protected_entities_sync += 1
+                elif entity_protection_policy.replication_configurations[0].schedule.recovery_point_objective_time_seconds > 0 and entity_protection_policy.replication_configurations[0].schedule.recovery_point_objective_time_seconds <= 900:
+                    dr_protected_entities_nearsync += 1
+                else:
+                    dr_protected_entities_async += 1
+            self.__dict__["nutanix_count_dr_protected_entities_sync"].labels(entity=prism_central_hostname).set(dr_protected_entities_sync)
+            self.__dict__["nutanix_count_dr_protected_entities_nearsync"].labels(entity=prism_central_hostname).set(dr_protected_entities_nearsync)
+            self.__dict__["nutanix_count_dr_protected_entities_async"].labels(entity=prism_central_hostname).set(dr_protected_entities_async)
+
+
             recovery_point_list = v4_get_all_entities(module=ntnx_dataprotection_py_client,client=dataprotection_client,function='list_recovery_points',limit=limit,module_entity_api='RecoveryPointsApi')
             self.__dict__["nutanix_count_dr_recovery_points"].labels(entity=prism_central_hostname).set(len(recovery_point_list))
             self.__dict__["nutanix_count_dr_recovery_points_vm"].labels(entity=prism_central_hostname).set(sum([len([vm_recovery_point for vm_recovery_point in recovery_point.vm_recovery_points]) for recovery_point in recovery_point_list if recovery_point.vm_recovery_points]))
@@ -1210,7 +1232,7 @@ class NutanixMetrics:
 
         #endregion #?clustermgmt
 
-
+        #todo: deal with rate limits
         #region #?networking
         if self.networking_metrics:
             #* initialize variable for API client configuration
@@ -1274,7 +1296,8 @@ class NutanixMetrics:
             #endregion #?layer2 stretch
 
             #region #?load balancer sessions
-            if not load_balancer_sessions_list:
+            #! skipping this as this is causing too much latency for now
+            """ if not load_balancer_sessions_list:
                 load_balancer_sessions_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_load_balancer_sessions',limit=limit,module_entity_api='LoadBalancerSessionsApi')
 
             #region stats
@@ -1327,7 +1350,7 @@ class NutanixMetrics:
                     key, entity, value = metric.split(':')
                     #print(f"key: {key}, entity: {entity}, value: {value}")
                     self.__dict__[key].labels(load_balancer_session=entity).set(value)
-            #endregion stats
+            #endregion stats """
             #endregion #?load balancer sessions
 
             #region #?traffic mirror
@@ -1335,7 +1358,7 @@ class NutanixMetrics:
                 traffic_mirrors_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_traffic_mirrors',limit=limit,module_entity_api='TrafficMirrorsApi')
 
             #region stats
-            #* get metrics for each load balancer sessions
+            #* get metrics for each traffic mirror
             traffic_mirrors_details_list = []
             metrics=[]
             error_list=[]
@@ -1952,7 +1975,8 @@ class NutanixMetrics:
             #endregion #?volume_group stats
 
             #region #?volume disks
-            #region get entities
+            #! skipping this for now as this is causing too much latency
+            """ #region get entities
             volume_disk_details_list = []
             metrics=[]
             for entity in volume_group_list:
@@ -2054,7 +2078,7 @@ class NutanixMetrics:
                     entity = entity.replace("-","_")
                     self.__dict__[key].labels(volume_disk=entity).set(value)
             #endregion stats
-
+ """
             #endregion #?volume disks
 
         #endregion #?volumes
@@ -3826,7 +3850,7 @@ def main():
         networking_metrics = networking_metrics_env.lower() in ("true", "1", "t", "y", "yes")
     else:
         networking_metrics = False
-    
+
     microseg_metrics_env = os.getenv('MICROSEG_METRICS',default='False')
     if microseg_metrics_env is not None:
         microseg_metrics = microseg_metrics_env.lower() in ("true", "1", "t", "y", "yes")
