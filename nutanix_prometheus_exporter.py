@@ -2192,6 +2192,9 @@ class NutanixMetricsLegacy:
                 "nutanix_thermal_system_temp_celcius",
                 "nutanix_thermal_peripheral_temp_celcius",
                 "nutanix_thermal_inlet_temp_celcius",
+                "nutanix_power_state",
+                "nutanix_cpu_utilization",
+                "nutanix_memory_utilization"
             ]
             for key_string in key_strings:
                 setattr(self, key_string, Gauge(key_string, key_string, ['node']))
@@ -2666,7 +2669,7 @@ class NutanixMetricsRedfish:
     def __init__(self,
                  ipmi_config,
                  polling_interval_seconds=30, api_requests_timeout_seconds=30, api_requests_retries=5, api_sleep_seconds_between_retries=15,
-                 ipmi_secure=False,
+                 ipmi_secure=False,ipmi_additional_metrics=False,
                  ):
         self.ipmi_config = ipmi_config
         self.polling_interval_seconds = polling_interval_seconds
@@ -2674,6 +2677,7 @@ class NutanixMetricsRedfish:
         self.api_requests_retries = api_requests_retries
         self.api_sleep_seconds_between_retries = api_sleep_seconds_between_retries
         self.ipmi_secure = ipmi_secure
+        self.ipmi_additional_metrics = ipmi_additional_metrics
 
         print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d_%H:%M:%S')} [INFO] Initializing metrics for IPMI adapters...{PrintColors.RESET}")
         key_strings = [
@@ -2686,6 +2690,9 @@ class NutanixMetricsRedfish:
             "nutanix_thermal_system_temp_celcius",
             "nutanix_thermal_peripheral_temp_celcius",
             "nutanix_thermal_inlet_temp_celcius",
+            "nutanix_power_state",
+            "nutanix_cpu_utilization",
+            "nutanix_memory_utilization"
         ]
         for key_string in key_strings:
             setattr(self, key_string, Gauge(key_string, key_string, ['ipmi']))
@@ -2699,14 +2706,12 @@ class NutanixMetricsRedfish:
             print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Waiting for {self.polling_interval_seconds} seconds...{PrintColors.RESET}")
             time.sleep(self.polling_interval_seconds)
 
-
     def process_redfish_entity(self,ipmi_entity):
         """Retrieves metrics from a single IPMI entity and updates Prometheus metrics."""
         ipmi = ipmi_entity['ip']
         ipmi_name = ipmi_entity['name']
         ipmi_username = ipmi_entity['username']
         ipmi_secret = ipmi_entity['password']
-
 
         #* collection power consumption metrics
         power_control = ipmi_get_powercontrol(ipmi,secret=ipmi_secret,username=ipmi_username,secure=self.ipmi_secure)
@@ -2725,7 +2730,6 @@ class NutanixMetricsRedfish:
         key_string = "nutanix_power_consumption_average_consumed_watts"
         power = float(power_control.get('PowerMetrics', {}).get('AverageConsumedWatts', 0))
         self.__dict__[key_string].labels(ipmi=ipmi_name).set(power_control['PowerMetrics']['AverageConsumedWatts'])
-
 
         #* collection thermal metrics
         thermal = ipmi_get_thermal(ipmi,secret=ipmi_secret,username=ipmi_username,secure=self.ipmi_secure)
@@ -2759,6 +2763,23 @@ class NutanixMetricsRedfish:
             key_string = "nutanix_thermal_cpu_temp_celsius"
             self.__dict__[key_string].labels(ipmi=ipmi_name).set(cpu_temp)
 
+        # * collection additional metrics based on env variable
+        if self.ipmi_additional_metrics is not False:
+            #* collection power state
+            power_state_str = ipmi_get_power_state(ipmi, secret=ipmi_secret, username=ipmi_username, secure=self.ipmi_secure)
+            key_string = "nutanix_power_state"
+            power_state = 1 if power_state_str == 'On' else 0
+            self.__dict__[key_string].labels(ipmi=ipmi_name).set(power_state)
+
+            #* collection cpu util
+            cpu_util = ipmi_get_cpu_utilization(ipmi, secret=ipmi_secret, username=ipmi_username, secure=self.ipmi_secure)
+            key_string = "nutanix_cpu_utilization"
+            self.__dict__[key_string].labels(ipmi=ipmi_name).set(cpu_util)
+
+            #* collection mem util
+            mem_util = ipmi_get_memory_utilization(ipmi, secret=ipmi_secret, username=ipmi_username, secure=self.ipmi_secure)
+            key_string = "nutanix_memory_utilization"
+            self.__dict__[key_string].labels(ipmi=ipmi_name).set(mem_util)
 
     def fetch(self):
         """
@@ -3262,7 +3283,6 @@ def ipmi_get_powercontrol(api_server,secret,username='ADMIN',api_requests_timeou
         ))
         raise
 
-
 def ipmi_get_thermal(api_server,secret,username='ADMIN',api_requests_timeout_seconds=30, api_requests_retries=5, api_sleep_seconds_between_retries=15,secure=False):
     """Retrieves data from the IPMI RedFisk REST API endpoint /Thermal.
 
@@ -3308,7 +3328,146 @@ def ipmi_get_thermal(api_server,secret,username='ADMIN',api_requests_timeout_sec
             indent=4
         ))
         raise
+
 #todo: add get cpu and memory metrics from redfish
+def ipmi_get_cpu_utilization(api_server,secret,username='ADMIN',api_requests_timeout_seconds=30, api_requests_retries=5, api_sleep_seconds_between_retries=15,secure=False):
+    """Retrieves data from the IPMI RedFisk REST API endpoint /Systems.
+
+    Args:
+        api_server: The IP or FQDN of the IPMI.
+        username: The IPMI user name (defaults to ADMIN).
+        secret: The IPMI user name password.
+        
+    Returns:
+        CPU utilization metrics object as cpu_utilization
+    """
+
+    #region prepare the api call
+    headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+    }
+    api_server_endpoint = "/redfish/v1/Systems/1/ProcessorSummary/ProcessorMetrics"
+    url = "https://{}{}".format(
+        api_server,
+        api_server_endpoint
+    )
+    method = "GET"
+    #endregion
+
+    print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Making a {method} API call to {url} with secure set to {secure}{PrintColors.RESET}")
+    resp = process_request(url,method,username,secret,headers,secure=secure,api_requests_timeout_seconds=api_requests_timeout_seconds, api_requests_retries=api_requests_retries, api_sleep_seconds_between_retries=api_sleep_seconds_between_retries)
+
+    # deal with the result/response
+    if resp.ok:
+        json_resp = json.loads(resp.content)
+        cpu_utilization = json_resp['BandwidthPercent']
+        return cpu_utilization
+    else:
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Request failed! Status code: {resp.status_code}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] reason: {resp.reason}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] text: {resp.text}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] raise_for_status: {resp.raise_for_status()}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] elapsed: {resp.elapsed}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] headers: {resp.headers}{PrintColors.RESET}")
+        print(json.dumps(
+            json.loads(resp.content),
+            indent=4
+        ))
+        raise
+
+def ipmi_get_memory_utilization(api_server,secret,username='ADMIN',api_requests_timeout_seconds=30, api_requests_retries=5, api_sleep_seconds_between_retries=15,secure=False):
+    """Retrieves data from the IPMI RedFisk REST API endpoint /Systems.
+
+    Args:
+        api_server: The IP or FQDN of the IPMI.
+        username: The IPMI user name (defaults to ADMIN).
+        secret: The IPMI user name password.
+        
+    Returns:
+        Memory utilization metrics object as memory_utilization
+    """
+
+    #region prepare the api call
+    headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+    }
+    api_server_endpoint = "/redfish/v1/Systems/1/MemorySummary/MemoryMetrics"
+    url = "https://{}{}".format(
+        api_server,
+        api_server_endpoint
+    )
+    method = "GET"
+    #endregion
+
+    print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Making a {method} API call to {url} with secure set to {secure}{PrintColors.RESET}")
+    resp = process_request(url,method,username,secret,headers,secure=secure,api_requests_timeout_seconds=api_requests_timeout_seconds, api_requests_retries=api_requests_retries, api_sleep_seconds_between_retries=api_sleep_seconds_between_retries)
+
+    # deal with the result/response
+    if resp.ok:
+        json_resp = json.loads(resp.content)
+        memory_utilization = json_resp['BandwidthPercent']
+        return memory_utilization
+    else:
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Request failed! Status code: {resp.status_code}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] reason: {resp.reason}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] text: {resp.text}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] raise_for_status: {resp.raise_for_status()}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] elapsed: {resp.elapsed}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] headers: {resp.headers}{PrintColors.RESET}")
+        print(json.dumps(
+            json.loads(resp.content),
+            indent=4
+        ))
+        raise
+
+def ipmi_get_power_state(api_server,secret,username='ADMIN',api_requests_timeout_seconds=30, api_requests_retries=5, api_sleep_seconds_between_retries=15,secure=False):
+    """Retrieves data from the IPMI RedFisk REST API endpoint /Systems.
+
+    Args:
+        api_server: The IP or FQDN of the IPMI.
+        username: The IPMI user name (defaults to ADMIN).
+        secret: The IPMI user name password.
+        
+    Returns:
+        Power state metrics object as power_state
+    """
+
+    #region prepare the api call
+    headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json'
+    }
+    api_server_endpoint = "/redfish/v1/Systems/1"
+    url = "https://{}{}".format(
+        api_server,
+        api_server_endpoint
+    )
+    method = "GET"
+    #endregion
+
+    print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Making a {method} API call to {url} with secure set to {secure}{PrintColors.RESET}")
+    resp = process_request(url,method,username,secret,headers,secure=secure,api_requests_timeout_seconds=api_requests_timeout_seconds, api_requests_retries=api_requests_retries, api_sleep_seconds_between_retries=api_sleep_seconds_between_retries)
+
+    # deal with the result/response
+    if resp.ok:
+        json_resp = json.loads(resp.content)
+        power_state = json_resp['PowerState']
+        return power_state
+    else:
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Request failed! Status code: {resp.status_code}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] reason: {resp.reason}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] text: {resp.text}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] raise_for_status: {resp.raise_for_status()}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] elapsed: {resp.elapsed}{PrintColors.RESET}")
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] headers: {resp.headers}{PrintColors.RESET}")
+        print(json.dumps(
+            json.loads(resp.content),
+            indent=4
+        ))
+        raise
+#endtodo: get cpu and memory metrics from redfish
 
 def get_total_entities(api_server, username, password, entity_type, entity_api_root, fiql_filter=None, secure=False):
 
@@ -3890,6 +4049,12 @@ def main():
         ipmi_secure = False
         #! suppress warnings about insecure connections
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    ipmi_additional_metrics_env = os.getenv('IPMI_ADDITIONAL_METRICS', default='False')
+    if ipmi_additional_metrics_env is not None:
+        ipmi_additional_metrics = ipmi_additional_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+    else:
+        ipmi_additional_metrics = False
 
     ipmi_config = json.loads(os.getenv('IPMI_CONFIG', '[]'))
 
@@ -3948,6 +4113,7 @@ def main():
             api_sleep_seconds_between_retries=api_sleep_seconds_between_retries,
             ipmi_secure=ipmi_secure,
             ipmi_config=ipmi_config,
+            ipmi_additional_metrics=ipmi_additional_metrics,
         )
         print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Starting http server on port {exporter_port}{PrintColors.RESET}")
         start_http_server(exporter_port)
