@@ -59,3 +59,6 @@ dmypy.json
 
 # Cursor
 .cursor/
+
+# Local secrets and configuration
+.local/
