@@ -522,8 +522,8 @@ class NutanixMetrics:
                 volumes_client = v4_init_api_client(module='ntnx_volumes_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
                 volume_group_list = v4_get_all_entities(module=ntnx_volumes_py_client,client=volumes_client,function='list_volume_groups',limit=limit,module_entity_api='VolumeGroupsApi')
                 self.__dict__["nutanix_count_vg"].labels(entity=prism_central_hostname).set(len(volume_group_list))
-                self.__dict__["nutanix_count_vg_shared"].labels(entity=prism_central_hostname).set(len([vg for vg in volume_group_list if vg.sharing_status == 'SHARED']))
-                self.__dict__["nutanix_count_vg_not_shared"].labels(entity=prism_central_hostname).set(len([vg for vg in volume_group_list if vg.sharing_status == 'NOT_SHARED']))
+                self.__dict__["nutanix_count_vg_shared"].labels(entity=prism_central_hostname).set(len([vg for vg in volume_group_list if getattr(vg, "sharing_status", None) == 'SHARED']))
+                self.__dict__["nutanix_count_vg_not_shared"].labels(entity=prism_central_hostname).set(len([vg for vg in volume_group_list if getattr(vg, "sharing_status", None) == 'NOT_SHARED']))
             #endregion vg
 
             #region vm
@@ -919,7 +919,7 @@ class NutanixMetrics:
                 volume_group_list = v4_get_all_entities(module=ntnx_volumes_py_client,client=volumes_client,function='list_volume_groups',limit=limit,module_entity_api='VolumeGroupsApi')
             for cluster in cluster_list:
                 if 'PRISM_CENTRAL' not in cluster.config.cluster_function:
-                    self.__dict__["nutanix_count_vg"].labels(entity=cluster.name).set(len([vg for vg in volume_group_list if vg.cluster_reference == cluster.ext_id]))
+                    self.__dict__["nutanix_count_vg"].labels(entity=cluster.name).set(len([vg for vg in volume_group_list if getattr(vg, "cluster_reference", None) == cluster.ext_id]))
             #endregion vg
 
             #region vm
@@ -1929,8 +1929,8 @@ class NutanixMetrics:
             error_list=[]
             for entity in volume_group_list:
                 entity_details = {
-                    'entity_name': entity.name,
-                    'entity_uuid': entity.ext_id,
+                    'entity_name': getattr(entity, "name", None),
+                    'entity_uuid': getattr(entity, "ext_id", None),
                 }
                 volume_group_details_list.append(entity_details)
             #print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Processing {len(volume_group_details_list)} entities...{PrintColors.RESET}")
