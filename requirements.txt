@@ -16,3 +16,6 @@ ntnx_monitoring_py_client==4.0.1
 humanfriendly
 urllib3
 ipaddress
+pydantic>=2.0.0
+pytest>=7.0.0
+pytest-cov>=4.0.0

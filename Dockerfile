@@ -1,15 +1,36 @@
-FROM python:slim-bookworm
+FROM python:3.11-slim-bookworm
 
-WORKDIR /~
+# Create non-root user
+RUN groupadd -r exporter && useradd -r -g exporter exporter
 
+WORKDIR /app
+
+# Copy requirements first for better layer caching
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip cache purge
 
+# Copy application code
 COPY . .
 
+# Change ownership to non-root user
+RUN chown -R exporter:exporter /app
+
+# Switch to non-root user
+USER exporter
+
+# Expose exporter port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000')" || exit 1
+
+# Run the exporter
 CMD [ "python", "-u", "./nutanix_prometheus_exporter.py" ]
 
-#to make sure stdout shows up in the logs
+# Environment variables
+# to make sure stdout shows up in the logs
 ENV PYTHONUNBUFFERED=1
 #used to specify Prism Element IP address or FQDN (assuming FQDN can be resolved inside the container)
 ENV PRISM='127.0.0.1'

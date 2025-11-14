@@ -24,7 +24,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from collections.abc import Iterable
 from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any, List, Union
 import os
+import sys
 import traceback
 import json
 import importlib
@@ -39,6 +41,27 @@ import tqdm
 import inflection
 from humanfriendly import format_timespan
 from prometheus_client import start_http_server, Gauge, Info
+
+# Add src to path for new modules
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+# Import new enhanced modules
+try:
+    from nutanix_exporter.config.settings import ExporterConfig
+    from nutanix_exporter.utils import (
+        setup_logger,
+        get_logger,
+        RateLimiter,
+        AdaptiveRateLimiter,
+        NutanixAPIError,
+        AuthenticationError,
+        RateLimitError,
+    )
+    ENHANCED_MODULES_AVAILABLE = True
+except ImportError as e:
+    # Fallback if new modules not available
+    ENHANCED_MODULES_AVAILABLE = False
+    print(f"Warning: Enhanced modules not available: {e}. Using legacy mode.")
 
 import ntnx_vmm_py_client
 import ntnx_clustermgmt_py_client
@@ -2837,11 +2860,10 @@ def process_request(url, method, user, password, headers, api_requests_timeout_s
     retries = api_requests_retries
     sleep_between_retries = api_sleep_seconds_between_retries
 
+    response = None
     while retries > 0:
         try:
-
             if method == 'GET':
-                #print("secure is {}".format(secure))
                 response = requests.get(
                     url,
                     headers=headers,
@@ -2885,20 +2907,27 @@ def process_request(url, method, user, password, headers, api_requests_timeout_s
                     verify=secure,
                     timeout=timeout
                 )
+            
+            # If we get here, request was successful
+            break
 
-        except requests.exceptions.HTTPError:
-            print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Http Error! Status code: {response.status_code}{PrintColors.RESET}")
-            print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] reason: {response.reason}{PrintColors.RESET}")
-            print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] text: {response.text}{PrintColors.RESET}")
-            print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] elapsed: {response.elapsed}{PrintColors.RESET}")
-            print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] headers: {response.headers}{PrintColors.RESET}")
-            if payload is not None:
-                print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] payload: {payload}{PrintColors.RESET}")
-            print(json.dumps(
-                json.loads(response.content),
-                indent=4
-            ))
-            error_message = f"HTTPError {url} {response.status_code} {response.reason} {response.text}"
+        except requests.exceptions.HTTPError as e:
+            # HTTPError is raised by response.raise_for_status(), so response exists
+            if response is not None:
+                print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Http Error! Status code: {response.status_code}{PrintColors.RESET}")
+                print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] reason: {response.reason}{PrintColors.RESET}")
+                print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] text: {response.text}{PrintColors.RESET}")
+                print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] elapsed: {response.elapsed}{PrintColors.RESET}")
+                print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] headers: {response.headers}{PrintColors.RESET}")
+                if payload is not None:
+                    print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] payload: {payload}{PrintColors.RESET}")
+                try:
+                    print(json.dumps(json.loads(response.content), indent=4))
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+                error_message = f"HTTPError {url} {response.status_code} {response.reason} {response.text}"
+            else:
+                error_message = f"HTTPError {url}: {str(e)}"
             raise Exception(error_message)
         except requests.exceptions.ConnectionError as error_code:
             if retries == 1:
@@ -2923,11 +2952,18 @@ def process_request(url, method, user, password, headers, api_requests_timeout_s
                 print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {url} Retries left: {retries}{PrintColors.RESET}")
                 continue
         except requests.exceptions.RequestException as error_code:
-            print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] {url} {response.status_code} {PrintColors.RESET}")
-            error_message = f"{url} {response.status_code}"
+            # RequestException is a base class, response may not exist
+            if response is not None:
+                print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] {url} {response.status_code} {PrintColors.RESET}")
+                error_message = f"{url} {response.status_code}"
+            else:
+                print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] {url} RequestException: {str(error_code)} {PrintColors.RESET}")
+                error_message = f"{url} RequestException: {str(error_code)}"
             raise Exception(error_message)
-        break
-
+    
+    if response is None:
+        raise Exception(f"Failed to get response after {api_requests_retries} retries for {url}")
+    
     if response.ok:
         return response
     if response.status_code == 401:
@@ -3963,173 +3999,256 @@ def v4_init_api_client(module, prism, user, pwd, prism_secure=False):
     return client
 
 
-def main():
-    """Main entry point"""
-
-    print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Getting environment variables...{PrintColors.RESET}")
-    polling_interval_seconds = int(os.getenv("POLLING_INTERVAL_SECONDS", "30"))
-    api_requests_timeout_seconds = int(os.getenv("API_REQUESTS_TIMEOUT_SECONDS", "30"))
-    api_requests_retries = int(os.getenv("API_REQUESTS_RETRIES", "5"))
-    api_sleep_seconds_between_retries = int(os.getenv("API_SLEEP_SECONDS_BETWEEN_RETRIES", "15"))
-    app_port = int(os.getenv("APP_PORT", "9440"))
-    exporter_port = int(os.getenv("EXPORTER_PORT", "8000"))
-
-    cluster_metrics_env = os.getenv('CLUSTER_METRICS',default='True')
-    if cluster_metrics_env is not None:
-        cluster_metrics = cluster_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        cluster_metrics = False
-
-    storage_containers_metrics_env = os.getenv('STORAGE_CONTAINERS_METRICS',default='True')
-    if storage_containers_metrics_env is not None:
-        storage_containers_metrics = storage_containers_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        storage_containers_metrics = False
-
-    disks_metrics_env = os.getenv('DISKS_METRICS',default='False')
-    if disks_metrics_env is not None:
-        disks_metrics = disks_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        disks_metrics = False
-
-    ipmi_metrics_env = os.getenv('IPMI_METRICS',default='True')
-    if ipmi_metrics_env is not None:
-        ipmi_metrics = ipmi_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        ipmi_metrics = False
-
-    prism_central_metrics_env = os.getenv('PRISM_CENTRAL_METRICS',default='False')
-    if prism_central_metrics_env is not None:
-        prism_central_metrics = prism_central_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        prism_central_metrics = False
-
-    networking_metrics_env = os.getenv('NETWORKING_METRICS',default='False')
-    if networking_metrics_env is not None:
-        networking_metrics = networking_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        networking_metrics = False
-
-    microseg_metrics_env = os.getenv('MICROSEG_METRICS',default='False')
-    if microseg_metrics_env is not None:
-        microseg_metrics = microseg_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        microseg_metrics = False
-
-    files_metrics_env = os.getenv('FILES_METRICS',default='False')
-    if files_metrics_env is not None:
-        files_metrics = files_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        files_metrics = False
-
-    object_metrics_env = os.getenv('OBJECT_METRICS',default='False')
-    if object_metrics_env is not None:
-        object_metrics = object_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        object_metrics = False
-
-    volumes_metrics_env = os.getenv('VOLUMES_METRICS',default='False')
-    if volumes_metrics_env is not None:
-        volumes_metrics = volumes_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        volumes_metrics = False
-
-    hosts_metrics_env = os.getenv('HOSTS_METRICS',default='False')
-    if hosts_metrics_env is not None:
-        hosts_metrics = hosts_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        hosts_metrics = False
-
-    ncm_ssp_metrics_env = os.getenv('NCM_SSP_METRICS',default='False')
-    if ncm_ssp_metrics_env is not None:
-        ncm_ssp_metrics = ncm_ssp_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        ncm_ssp_metrics = False
-
-    show_stats_only_env = os.getenv('SHOW_STATS_ONLY',default='False')
-    if show_stats_only_env is not None:
-        show_stats_only = show_stats_only_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        show_stats_only = False
-
-    prism_secure_env = os.getenv('PRISM_SECURE',default='False')
-    if prism_secure_env is not None:
-        prism_secure = prism_secure_env.lower() in ("true", "1", "t", "y", "yes")
-        if prism_secure is False:
-            #! suppress warnings about insecure connections
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    else:
-        prism_secure = False
-        #! suppress warnings about insecure connections
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    ipmi_secure_env = os.getenv('IPMI_SECURE',default='False')
-    if ipmi_secure_env is not None:
-        ipmi_secure = ipmi_secure_env.lower() in ("true", "1", "t", "y", "yes")
-        if ipmi_secure is False:
-            #! suppress warnings about insecure connections
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    else:
-        ipmi_secure = False
-        #! suppress warnings about insecure connections
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def main() -> None:
+    """Main entry point with enhanced configuration and logging."""
+    global ENHANCED_MODULES_AVAILABLE
     
-    ipmi_additional_metrics_env = os.getenv('IPMI_ADDITIONAL_METRICS', default='False')
-    if ipmi_additional_metrics_env is not None:
-        ipmi_additional_metrics = ipmi_additional_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        ipmi_additional_metrics = False
+    # Initialize logger if enhanced modules available
+    use_enhanced = ENHANCED_MODULES_AVAILABLE
+    logger = None
+    
+    if use_enhanced:
+        try:
+            logger = setup_logger(level=os.getenv("LOG_LEVEL", "INFO"))
+            logger.info("Starting Nutanix Prometheus Exporter (Enhanced Mode)")
+            # Use new configuration system
+            config = ExporterConfig.from_env()
+            logger.info(f"Configuration loaded: Prism={config.prism}, Mode={config.operations_mode}")
+            
+            # Extract values from config
+            polling_interval_seconds = config.polling_interval_seconds
+            api_requests_timeout_seconds = config.api.timeout_seconds
+            api_requests_retries = config.api.retries
+            api_sleep_seconds_between_retries = config.api.sleep_between_retries
+            app_port = config.app_port
+            exporter_port = config.exporter_port
+            operations_mode_env = config.operations_mode
+            prism_secure = config.prism_secure
+            ipmi_secure = config.ipmi_secure
+            ipmi_additional_metrics = config.metrics.ipmi_additional
+            ipmi_config = [item.model_dump() for item in config.ipmi_config]
+            
+            # Extract metrics config
+            cluster_metrics = config.metrics.cluster
+            hosts_metrics = config.metrics.hosts
+            storage_containers_metrics = config.metrics.storage_containers
+            disks_metrics = config.metrics.disks
+            networking_metrics = config.metrics.networking
+            files_metrics = config.metrics.files
+            object_metrics = config.metrics.object
+            volumes_metrics = config.metrics.volumes
+            ncm_ssp_metrics = config.metrics.ncm_ssp
+            prism_central_metrics = config.metrics.prism_central
+            microseg_metrics = config.metrics.microseg
+            ipmi_metrics = config.metrics.ipmi
+            show_stats_only = config.show_stats_only
+            
+            # Get credentials from config
+            prism = config.prism
+            user = config.prism_username
+            pwd = config.prism_secret
+            vm_list = config.vm_list
+            ipmi_username = config.ipmi_username
+            ipmi_secret = config.ipmi_secret
+            
+        except Exception as e:
+            if logger:
+                logger.error(f"Failed to load configuration: {e}")
+                logger.info("Falling back to legacy environment variable parsing")
+            else:
+                print(f"Warning: Enhanced modules failed to load: {e}. Using legacy mode.")
+            use_enhanced = False
+            ENHANCED_MODULES_AVAILABLE = False
+    
+    # Fallback to legacy mode
+    if not use_enhanced:
+        print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Getting environment variables (Legacy Mode)...{PrintColors.RESET}")
+        polling_interval_seconds = int(os.getenv("POLLING_INTERVAL_SECONDS", "30"))
+        api_requests_timeout_seconds = int(os.getenv("API_REQUESTS_TIMEOUT_SECONDS", "30"))
+        api_requests_retries = int(os.getenv("API_REQUESTS_RETRIES", "5"))
+        api_sleep_seconds_between_retries = int(os.getenv("API_SLEEP_SECONDS_BETWEEN_RETRIES", "15"))
+        app_port = int(os.getenv("APP_PORT", "9440"))
+        exporter_port = int(os.getenv("EXPORTER_PORT", "8000"))
 
-    ipmi_config = json.loads(os.getenv('IPMI_CONFIG', '[]'))
+        cluster_metrics_env = os.getenv('CLUSTER_METRICS',default='True')
+        if cluster_metrics_env is not None:
+            cluster_metrics = cluster_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            cluster_metrics = False
 
-    operations_mode_env = os.getenv('OPERATIONS_MODE',default='v4')
+        storage_containers_metrics_env = os.getenv('STORAGE_CONTAINERS_METRICS',default='True')
+        if storage_containers_metrics_env is not None:
+            storage_containers_metrics = storage_containers_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            storage_containers_metrics = False
+
+        disks_metrics_env = os.getenv('DISKS_METRICS',default='False')
+        if disks_metrics_env is not None:
+            disks_metrics = disks_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            disks_metrics = False
+
+        ipmi_metrics_env = os.getenv('IPMI_METRICS',default='True')
+        if ipmi_metrics_env is not None:
+            ipmi_metrics = ipmi_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            ipmi_metrics = False
+
+        prism_central_metrics_env = os.getenv('PRISM_CENTRAL_METRICS',default='False')
+        if prism_central_metrics_env is not None:
+            prism_central_metrics = prism_central_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            prism_central_metrics = False
+
+        networking_metrics_env = os.getenv('NETWORKING_METRICS',default='False')
+        if networking_metrics_env is not None:
+            networking_metrics = networking_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            networking_metrics = False
+
+        microseg_metrics_env = os.getenv('MICROSEG_METRICS',default='False')
+        if microseg_metrics_env is not None:
+            microseg_metrics = microseg_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            microseg_metrics = False
+
+        files_metrics_env = os.getenv('FILES_METRICS',default='False')
+        if files_metrics_env is not None:
+            files_metrics = files_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            files_metrics = False
+
+        object_metrics_env = os.getenv('OBJECT_METRICS',default='False')
+        if object_metrics_env is not None:
+            object_metrics = object_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            object_metrics = False
+
+        volumes_metrics_env = os.getenv('VOLUMES_METRICS',default='False')
+        if volumes_metrics_env is not None:
+            volumes_metrics = volumes_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            volumes_metrics = False
+
+        hosts_metrics_env = os.getenv('HOSTS_METRICS',default='False')
+        if hosts_metrics_env is not None:
+            hosts_metrics = hosts_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            hosts_metrics = False
+
+        ncm_ssp_metrics_env = os.getenv('NCM_SSP_METRICS',default='False')
+        if ncm_ssp_metrics_env is not None:
+            ncm_ssp_metrics = ncm_ssp_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            ncm_ssp_metrics = False
+
+        show_stats_only_env = os.getenv('SHOW_STATS_ONLY',default='False')
+        if show_stats_only_env is not None:
+            show_stats_only = show_stats_only_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            show_stats_only = False
+
+        prism_secure_env = os.getenv('PRISM_SECURE',default='False')
+        if prism_secure_env is not None:
+            prism_secure = prism_secure_env.lower() in ("true", "1", "t", "y", "yes")
+            if prism_secure is False:
+                #! suppress warnings about insecure connections
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        else:
+            prism_secure = False
+            #! suppress warnings about insecure connections
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        ipmi_secure_env = os.getenv('IPMI_SECURE',default='False')
+        if ipmi_secure_env is not None:
+            ipmi_secure = ipmi_secure_env.lower() in ("true", "1", "t", "y", "yes")
+            if ipmi_secure is False:
+                #! suppress warnings about insecure connections
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        else:
+            ipmi_secure = False
+            #! suppress warnings about insecure connections
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        ipmi_additional_metrics_env = os.getenv('IPMI_ADDITIONAL_METRICS', default='False')
+        if ipmi_additional_metrics_env is not None:
+            ipmi_additional_metrics = ipmi_additional_metrics_env.lower() in ("true", "1", "t", "y", "yes")
+        else:
+            ipmi_additional_metrics = False
+
+        ipmi_config = json.loads(os.getenv('IPMI_CONFIG', '[]'))
+
+        operations_mode_env = os.getenv('OPERATIONS_MODE',default='v4')
+        
+        # Get credentials from environment in legacy mode
+        prism = os.getenv('PRISM')
+        user = os.getenv('PRISM_USERNAME')
+        pwd = os.getenv('PRISM_SECRET')
+        vm_list = os.getenv('VM_LIST', '')
+        ipmi_username = os.getenv('IPMI_USERNAME', 'ADMIN')
+        ipmi_secret = os.getenv('IPMI_SECRET')
 
     if operations_mode_env == 'legacy':
-        print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Initializing metrics class...{PrintColors.RESET}")
+        if use_enhanced and logger:
+            logger.info("Initializing metrics class (Legacy Mode)...")
+        else:
+            print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Initializing metrics class...{PrintColors.RESET}")
         nutanix_metrics = NutanixMetricsLegacy(
             app_port=app_port,
             polling_interval_seconds=polling_interval_seconds,
             api_requests_timeout_seconds=api_requests_timeout_seconds,
             api_requests_retries=api_requests_retries,
             api_sleep_seconds_between_retries=api_sleep_seconds_between_retries,
-            prism=os.getenv('PRISM'),
-            user = os.getenv('PRISM_USERNAME'),
-            pwd = os.getenv('PRISM_SECRET'),
+            prism=prism,
+            user=user,
+            pwd=pwd,
             prism_secure=prism_secure,
-            ipmi_username = os.getenv('IPMI_USERNAME', default='ADMIN'),
-            ipmi_secret = os.getenv('IPMI_SECRET', default=None),
-            vm_list=os.getenv('VM_LIST'),
+            ipmi_username=ipmi_username,
+            ipmi_secret=ipmi_secret,
+            vm_list=vm_list,
             cluster_metrics=cluster_metrics,
             storage_containers_metrics=storage_containers_metrics,
             ipmi_metrics=ipmi_metrics,
             prism_central_metrics=prism_central_metrics,
             ncm_ssp_metrics=ncm_ssp_metrics
         )
-        print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Starting http server on port {exporter_port}{PrintColors.RESET}")
+        if use_enhanced and logger:
+            logger.info(f"Starting http server on port {exporter_port}")
+        else:
+            print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Starting http server on port {exporter_port}{PrintColors.RESET}")
         start_http_server(exporter_port)
         nutanix_metrics.run_metrics_loop()
     elif operations_mode_env == 'v4':
-        print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Initializing metrics class...{PrintColors.RESET}")
+        if use_enhanced and logger:
+            logger.info("Initializing metrics class (v4 Mode)...")
+        else:
+            print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Initializing metrics class...{PrintColors.RESET}")
         nutanix_metrics = NutanixMetrics(
             app_port=app_port,
             polling_interval_seconds=polling_interval_seconds,
             api_requests_timeout_seconds=api_requests_timeout_seconds,
             api_requests_retries=api_requests_retries,
             api_sleep_seconds_between_retries=api_sleep_seconds_between_retries,
-            prism=os.getenv('PRISM'),
-            user = os.getenv('PRISM_USERNAME'),
-            pwd = os.getenv('PRISM_SECRET'),
+            prism=prism,
+            user=user,
+            pwd=pwd,
             prism_secure=prism_secure,
             cluster_metrics=cluster_metrics, hosts_metrics=hosts_metrics, storage_containers_metrics=storage_containers_metrics, disks_metrics=disks_metrics, networking_metrics=networking_metrics, 
             files_metrics=files_metrics, object_metrics=object_metrics, volumes_metrics=volumes_metrics, ncm_ssp_metrics=ncm_ssp_metrics, prism_central_metrics=prism_central_metrics, microseg_metrics=microseg_metrics,
-            vm_list=os.getenv('VM_LIST'),
+            vm_list=vm_list,
             show_stats_only=show_stats_only
         )
-        print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Starting http server on port {exporter_port}{PrintColors.RESET}")
+        if use_enhanced and logger:
+            logger.info(f"Starting http server on port {exporter_port}")
+        else:
+            print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Starting http server on port {exporter_port}{PrintColors.RESET}")
         start_http_server(exporter_port)
         nutanix_metrics.run_metrics_loop()
     elif operations_mode_env == 'redfish':
-        print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Initializing metrics class...{PrintColors.RESET}")
+        if use_enhanced and logger:
+            logger.info("Initializing metrics class (Redfish Mode)...")
+        else:
+            print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Initializing metrics class...{PrintColors.RESET}")
         nutanix_metrics = NutanixMetricsRedfish(
             polling_interval_seconds=polling_interval_seconds,
             api_requests_timeout_seconds=api_requests_timeout_seconds,
@@ -4139,11 +4258,18 @@ def main():
             ipmi_config=ipmi_config,
             ipmi_additional_metrics=ipmi_additional_metrics,
         )
-        print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Starting http server on port {exporter_port}{PrintColors.RESET}")
+        if use_enhanced and logger:
+            logger.info(f"Starting http server on port {exporter_port}")
+        else:
+            print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Starting http server on port {exporter_port}{PrintColors.RESET}")
         start_http_server(exporter_port)
         nutanix_metrics.run_metrics_loop()
     else:
-        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Invalid operations mode (v4, legacy, redfish): {operations_mode_env}{PrintColors.RESET}")
+        error_msg = f"Invalid operations mode (v4, legacy, redfish): {operations_mode_env}"
+        if use_enhanced and logger:
+            logger.error(error_msg)
+        else:
+            print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] {error_msg}{PrintColors.RESET}")
 #endregion #*FUNCTIONS
 
 
