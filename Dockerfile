@@ -113,9 +113,9 @@ ENV NETWORKING_METRICS='True'
 #used to determine if Flow Network Security metrics will be generated
 ENV MICROSEG_METRICS='True'
 #used to determine if Nutanix Files metrics will be generated
-ENV FILES_METRICS='True'
+ENV FILES_METRICS='False'
 #used to determine if Nutanix Object metrics will be generated
-ENV OBJECT_METRICS='True'
+ENV OBJECT_METRICS='False'
 #used to determine if Nutanix Volume metrics will be generated
 ENV VOLUMES_METRICS='True'
 #used to determine if Hosts/Nodes metrics will be generated
