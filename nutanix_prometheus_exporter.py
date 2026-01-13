@@ -1587,6 +1587,8 @@ class NutanixMetrics:
                 vm_stats_list = stats_list
                 exclude_list = ['timestamp','_reserved','_object_type','_unknown_fields','ext_id','links', 'container_ext_id', 'tenant_id', 'stat_type', 'cluster', 'hypervisor_type']
                 for vm_stat in vm_stats_list:
+                    if vm_stat is None:
+                        continue
                     vm_name = [vm.name for vm in vms_list if vm.ext_id == vm_stat.ext_id]
                     if vm_name:
                         for vm_stats_tuple in vm_stat.stats:
