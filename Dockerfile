@@ -68,6 +68,14 @@ ENV IPMI_ADDITIONAL_METRICS='False'
 #with v4 operations mode, this determines if most count metrics are collected or not.
 #scope: legacy, v4
 ENV PRISM_CENTRAL_METRICS='True'
+#used to determine if Tasks metrics will be generated; set it to False value if you don't want to collect Tasks metrics.
+#tasks API endpoint can be pretty slow to respond in large environments so this is disabled by default
+#scope: v4
+ENV TASKS_METRICS='False'
+#used to determine if Alerts metrics will be generated; set it to False value if you don't want to collect Alerts metrics.
+#alerts API endpoint can be pretty slow to respond in large environments so this is disabled by default
+#scope: v4
+ENV ALERTS_METRICS='False'
 #used to determine if NCM SSP metrics will be generated; set it to False value if you don't want to collect NCM SSP metrics.
 #since there is no v4 NCM SSP API yet, this only works in legacy operations mode.
 #scope: legacy
