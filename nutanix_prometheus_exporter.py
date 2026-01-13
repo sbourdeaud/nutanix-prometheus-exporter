@@ -783,10 +783,10 @@ class NutanixMetrics:
 
             recovery_point_list = v4_get_all_entities(module=ntnx_dataprotection_py_client,client=dataprotection_client,function='list_recovery_points',limit=limit,module_entity_api='RecoveryPointsApi')
             self.__dict__["nutanix_count_dr_recovery_points"].labels(entity=prism_central_hostname).set(len(recovery_point_list))
-            self.__dict__["nutanix_count_dr_recovery_points_vm"].labels(entity=prism_central_hostname).set(sum([len([vm_recovery_point for vm_recovery_point in recovery_point.vm_recovery_points]) for recovery_point in recovery_point_list if recovery_point.vm_recovery_points]))
-            self.__dict__["nutanix_count_dr_recovery_points_vg"].labels(entity=prism_central_hostname).set(sum([len([vg_recovery_point for vg_recovery_point in recovery_point.volume_group_recovery_points]) for recovery_point in recovery_point_list if recovery_point.volume_group_recovery_points]))
-            self.__dict__["nutanix_count_dr_recovery_points_crash_consistent"].labels(entity=prism_central_hostname).set(len([recovery_point for recovery_point in recovery_point_list if recovery_point.recovery_point_type == 'CRASH_CONSISTENT']))
-            self.__dict__["nutanix_count_dr_recovery_points_application_consistent"].labels(entity=prism_central_hostname).set(len([recovery_point for recovery_point in recovery_point_list if recovery_point.recovery_point_type == 'APPLICATION_CONSISTENT']))
+            self.__dict__["nutanix_count_dr_recovery_points_vm"].labels(entity=prism_central_hostname).set(sum([len([vm_recovery_point for vm_recovery_point in recovery_point.vm_recovery_points]) for recovery_point in recovery_point_list if recovery_point and recovery_point.vm_recovery_points]))
+            self.__dict__["nutanix_count_dr_recovery_points_vg"].labels(entity=prism_central_hostname).set(sum([len([vg_recovery_point for vg_recovery_point in recovery_point.volume_group_recovery_points]) for recovery_point in recovery_point_list if recovery_point and recovery_point.volume_group_recovery_points]))
+            self.__dict__["nutanix_count_dr_recovery_points_crash_consistent"].labels(entity=prism_central_hostname).set(len([recovery_point for recovery_point in recovery_point_list if recovery_point and recovery_point.recovery_point_type == 'CRASH_CONSISTENT']))
+            self.__dict__["nutanix_count_dr_recovery_points_application_consistent"].labels(entity=prism_central_hostname).set(len([recovery_point for recovery_point in recovery_point_list if recovery_point and recovery_point.recovery_point_type == 'APPLICATION_CONSISTENT']))
             #endregion data protection
 
             #region microseg
