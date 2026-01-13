@@ -650,7 +650,8 @@ class NutanixMetrics:
             #endregion categories
 
             #region tasks
-            task_list = v4_get_all_entities(module=ntnx_prism_py_client,client=prism_client,function='list_tasks',limit=limit,module_entity_api='TasksApi',select='status')
+            #! turning this off as this takes too long in large environments
+            """ task_list = v4_get_all_entities(module=ntnx_prism_py_client,client=prism_client,function='list_tasks',limit=limit,module_entity_api='TasksApi',select='status')
             self.__dict__["nutanix_count_task"].labels(entity=prism_central_hostname).set(len(task_list))
             self.__dict__["nutanix_count_task_queued"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'QUEUED']))
             self.__dict__["nutanix_count_task_running"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'RUNNING']))
@@ -658,14 +659,15 @@ class NutanixMetrics:
             self.__dict__["nutanix_count_task_succeeded"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'SUCCEEDED']))
             self.__dict__["nutanix_count_task_failed"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'FAILED']))
             self.__dict__["nutanix_count_task_canceled"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'CANCELED']))
-            self.__dict__["nutanix_count_task_suspended"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'SUSPENDED']))
+            self.__dict__["nutanix_count_task_suspended"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'SUSPENDED'])) """
             #endregion tasks
 
             #region monitoring
             monitoring_client = v4_init_api_client(module='ntnx_monitoring_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
 
             #region alert
-            alert_list = v4_get_all_entities(module=ntnx_monitoring_py_client,client=monitoring_client,function='list_alerts',limit=limit,module_entity_api='AlertsApi',select='isResolved,isAcknowledged,severity')
+            #! turning this off as this takes too long in large environments
+            """ alert_list = v4_get_all_entities(module=ntnx_monitoring_py_client,client=monitoring_client,function='list_alerts',limit=limit,module_entity_api='AlertsApi',select='isResolved,isAcknowledged,severity')
             self.__dict__["nutanix_count_monitoring_alert"].labels(entity=prism_central_hostname).set(len(alert_list))
             self.__dict__["nutanix_count_monitoring_alert_resolved"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if alert.is_resolved is True]))
             self.__dict__["nutanix_count_monitoring_alert_not_resolved"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if alert.is_resolved is not True]))
@@ -679,7 +681,7 @@ class NutanixMetrics:
             self.__dict__["nutanix_count_monitoring_alert_critical_not_resolved"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'CRITICAL' and alert.is_resolved is not True)]))
             self.__dict__["nutanix_count_monitoring_alert_info_not_acknowledged"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'INFO' and alert.is_acknowledged is not True)]))
             self.__dict__["nutanix_count_monitoring_alert_warning_not_acknowledged"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'WARNING' and alert.is_acknowledged is not True)]))
-            self.__dict__["nutanix_count_monitoring_alert_critical_not_acknowledged"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'CRITICAL' and alert.is_acknowledged is not True)]))
+            self.__dict__["nutanix_count_monitoring_alert_critical_not_acknowledged"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'CRITICAL' and alert.is_acknowledged is not True)])) """
             #endregion alert
 
             #region audit
