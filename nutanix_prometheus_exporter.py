@@ -235,7 +235,7 @@ class NutanixMetrics:
                  app_port=9440, polling_interval_seconds=30, api_requests_timeout_seconds=30, api_requests_retries=5, api_sleep_seconds_between_retries=15,
                  unique_pc_count_metrics=unique_pc_count_metrics,shared_pc_cluster_count_metrics=shared_pc_cluster_count_metrics,shared_cluster_host_count_metrics=shared_cluster_host_count_metrics,unique_cluster_count_metrics=unique_cluster_count_metrics,
                  prism='127.0.0.1', user='admin', pwd='Nutanix/4u', prism_secure=False,
-                 cluster_metrics=True, hosts_metrics=True, storage_containers_metrics=True,disks_metrics=False, networking_metrics=False, files_metrics=False, object_metrics=False, volumes_metrics=False, ncm_ssp_metrics=False, prism_central_metrics = False, microseg_metrics = False, tasks_metrics=False, alerts_metrics=False,
+                 cluster_metrics=True, hosts_metrics=True, storage_containers_metrics=True,disks_metrics=False, networking_metrics=False, files_metrics=False, object_metrics=False, volumes_metrics=False, ncm_ssp_metrics=False, prism_central_metrics = False, microseg_metrics = False,
                  vm_list='',
                  show_stats_only=False):
         #region self.
@@ -260,8 +260,6 @@ class NutanixMetrics:
         self.vm_list = vm_list
         self.show_stats_only = show_stats_only
         self.prism_central_metrics = prism_central_metrics
-        self.tasks_metrics = tasks_metrics
-        self.alerts_metrics = alerts_metrics
         self.microseg_metrics = microseg_metrics
         self.unique_pc_count_metrics = unique_pc_count_metrics
         self.shared_pc_cluster_count_metrics = shared_pc_cluster_count_metrics
@@ -652,38 +650,40 @@ class NutanixMetrics:
             #endregion categories
 
             #region tasks
-            if self.tasks_metrics:
-                task_list = v4_get_all_entities(module=ntnx_prism_py_client,client=prism_client,function='list_tasks',limit=limit,module_entity_api='TasksApi',select='status')
-                self.__dict__["nutanix_count_task"].labels(entity=prism_central_hostname).set(len(task_list))
-                self.__dict__["nutanix_count_task_queued"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'QUEUED']))
-                self.__dict__["nutanix_count_task_running"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'RUNNING']))
-                self.__dict__["nutanix_count_task_canceling"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'CANCELING']))
-                self.__dict__["nutanix_count_task_succeeded"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'SUCCEEDED']))
-                self.__dict__["nutanix_count_task_failed"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'FAILED']))
-                self.__dict__["nutanix_count_task_canceled"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'CANCELED']))
-                self.__dict__["nutanix_count_task_suspended"].labels(entity=prism_central_hostname).set(len([task for task in task_list if task.status == 'SUSPENDED']))
+            print(f"{PrintColors.DATA}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching tasks count...{PrintColors.RESET}")
+            tasks_api_instance = ntnx_prism_py_client.TasksApi(prism_client)
+            task_count = tasks_api_instance.list_tasks(_limit=1,_select='status').metadata.total_available_results
+            self.__dict__["nutanix_count_task"].labels(entity=prism_central_hostname).set(task_count)
+            task_running_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'RUNNING'").metadata.total_available_results
+            self.__dict__["nutanix_count_task_running"].labels(entity=prism_central_hostname).set(task_running_count)
+            task_queued_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'QUEUED'").metadata.total_available_results
+            self.__dict__["nutanix_count_task_queued"].labels(entity=prism_central_hostname).set(task_queued_count)
+            task_canceling_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'CANCELING'").metadata.total_available_results
+            self.__dict__["nutanix_count_task_canceling"].labels(entity=prism_central_hostname).set(task_canceling_count)
+            task_succeeded_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'SUCCEEDED'").metadata.total_available_results
+            self.__dict__["nutanix_count_task_succeeded"].labels(entity=prism_central_hostname).set(task_succeeded_count)
+            task_failed_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'FAILED'").metadata.total_available_results
+            self.__dict__["nutanix_count_task_failed"].labels(entity=prism_central_hostname).set(task_failed_count)
+            task_canceled_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'CANCELED'").metadata.total_available_results
+            self.__dict__["nutanix_count_task_canceled"].labels(entity=prism_central_hostname).set(task_canceled_count)
+            task_suspended_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'SUSPENDED'").metadata.total_available_results
+            self.__dict__["nutanix_count_task_suspended"].labels(entity=prism_central_hostname).set(task_suspended_count)
             #endregion tasks
 
             #region monitoring
             monitoring_client = v4_init_api_client(module='ntnx_monitoring_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
 
             #region alert
-            if self.alerts_metrics:
-                alert_list = v4_get_all_entities(module=ntnx_monitoring_py_client,client=monitoring_client,function='list_alerts',limit=limit,module_entity_api='AlertsApi',select='isResolved,isAcknowledged,severity')
-                self.__dict__["nutanix_count_monitoring_alert"].labels(entity=prism_central_hostname).set(len(alert_list))
-                self.__dict__["nutanix_count_monitoring_alert_resolved"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if alert.is_resolved is True]))
-                self.__dict__["nutanix_count_monitoring_alert_not_resolved"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if alert.is_resolved is not True]))
-                self.__dict__["nutanix_count_monitoring_alert_acknowledged"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if alert.is_acknowledged is True]))
-                self.__dict__["nutanix_count_monitoring_alert_not_acknowledged"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if alert.is_acknowledged is not True]))
-                self.__dict__["nutanix_count_monitoring_alert_info"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if alert.severity == 'INFO']))
-                self.__dict__["nutanix_count_monitoring_alert_warning"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if alert.severity == 'WARNING']))
-                self.__dict__["nutanix_count_monitoring_alert_critical"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if alert.severity == 'CRITICAL']))
-                self.__dict__["nutanix_count_monitoring_alert_info_not_resolved"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'INFO' and alert.is_resolved is not True)]))
-                self.__dict__["nutanix_count_monitoring_alert_warning_not_resolved"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'WARNING' and alert.is_resolved is not True)]))
-                self.__dict__["nutanix_count_monitoring_alert_critical_not_resolved"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'CRITICAL' and alert.is_resolved is not True)]))
-                self.__dict__["nutanix_count_monitoring_alert_info_not_acknowledged"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'INFO' and alert.is_acknowledged is not True)]))
-                self.__dict__["nutanix_count_monitoring_alert_warning_not_acknowledged"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'WARNING' and alert.is_acknowledged is not True)]))
-                self.__dict__["nutanix_count_monitoring_alert_critical_not_acknowledged"].labels(entity=prism_central_hostname).set(len([alert for alert in alert_list if (alert.severity == 'CRITICAL' and alert.is_acknowledged is not True)]))
+            print(f"{PrintColors.DATA}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching alerts count...{PrintColors.RESET}")
+            alerts_api_instance = ntnx_monitoring_py_client.AlertsApi(monitoring_client)
+            alerts_not_resolved_count = alerts_api_instance.list_alerts(_limit=1,_select='isResolved,severity',_filter="isResolved eq false").metadata.total_available_results
+            self.__dict__["nutanix_count_monitoring_alert_not_resolved"].labels(entity=prism_central_hostname).set(alerts_not_resolved_count)
+            alerts_info_not_resolved_count = alerts_api_instance.list_alerts(_limit=1,_select='isResolved,severity',_filter="isResolved eq false and severity eq Monitoring.Common.Severity'INFO'").metadata.total_available_results
+            self.__dict__["nutanix_count_monitoring_alert_info_not_resolved"].labels(entity=prism_central_hostname).set(alerts_info_not_resolved_count)
+            alerts_warning_not_resolved_count = alerts_api_instance.list_alerts(_limit=1,_select='isResolved,severity',_filter="isResolved eq false and severity eq Monitoring.Common.Severity'WARNING'").metadata.total_available_results
+            self.__dict__["nutanix_count_monitoring_alert_warning_not_resolved"].labels(entity=prism_central_hostname).set(alerts_warning_not_resolved_count)
+            alerts_critical_not_resolved_count = alerts_api_instance.list_alerts(_limit=1,_select='isResolved,severity',_filter="isResolved eq false and severity eq Monitoring.Common.Severity'CRITICAL'").metadata.total_available_results
+            self.__dict__["nutanix_count_monitoring_alert_critical_not_resolved"].labels(entity=prism_central_hostname).set(alerts_critical_not_resolved_count)
             #endregion alert
 
             #region audit
@@ -4013,18 +4013,6 @@ def main():
     else:
         prism_central_metrics = False
 
-    tasks_metrics_env = os.getenv('TASKS_METRICS',default='False')
-    if tasks_metrics_env is not None:
-        tasks_metrics = tasks_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        tasks_metrics = False
-
-    alerts_metrics_env = os.getenv('ALERTS_METRICS',default='False')
-    if alerts_metrics_env is not None:
-        alerts_metrics = alerts_metrics_env.lower() in ("true", "1", "t", "y", "yes")
-    else:
-        alerts_metrics = False
-
     networking_metrics_env = os.getenv('NETWORKING_METRICS',default='False')
     if networking_metrics_env is not None:
         networking_metrics = networking_metrics_env.lower() in ("true", "1", "t", "y", "yes")
@@ -4094,7 +4082,7 @@ def main():
         ipmi_secure = False
         #! suppress warnings about insecure connections
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
+
     ipmi_additional_metrics_env = os.getenv('IPMI_ADDITIONAL_METRICS', default='False')
     if ipmi_additional_metrics_env is not None:
         ipmi_additional_metrics = ipmi_additional_metrics_env.lower() in ("true", "1", "t", "y", "yes")
@@ -4143,7 +4131,6 @@ def main():
             prism_secure=prism_secure,
             cluster_metrics=cluster_metrics, hosts_metrics=hosts_metrics, storage_containers_metrics=storage_containers_metrics, disks_metrics=disks_metrics, networking_metrics=networking_metrics, 
             files_metrics=files_metrics, object_metrics=object_metrics, volumes_metrics=volumes_metrics, ncm_ssp_metrics=ncm_ssp_metrics, prism_central_metrics=prism_central_metrics, microseg_metrics=microseg_metrics,
-            tasks_metrics=tasks_metrics, alerts_metrics=alerts_metrics,
             vm_list=os.getenv('VM_LIST'),
             show_stats_only=show_stats_only
         )
