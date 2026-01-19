@@ -18,6 +18,12 @@
 #todo: add licensing
 #todo: add lcm
 #todo: add iam
+#todo: process better recovery points
+#todo: add sync status for protected resources of type sync
+#todo: find out how to expose entities not meeting SLAs
+#todo: add cluster info to v4 mode
+#todo: limit properties retrieval to what is strictly necessary to reduce payload size
+#todo: find a way to process all metrics asymmetrically
 
 #region #*IMPORT
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3594,11 +3600,20 @@ def v4_get_entities(client,module,entity_api,function,page,limit=50,parent_entit
     entity_api_module = getattr(module, entity_api)
     entity_api = entity_api_module(api_client=client)
     list_function = getattr(entity_api, function)
-    if parent_entity_ext_id is not None:
-        response = list_function(parent_entity_ext_id,_page=page,_limit=limit,_filter=query_filter,_select=select)
-    else:
-        response = list_function(_page=page,_limit=limit,_filter=query_filter,_select=select)
-    return response
+    try:
+        if parent_entity_ext_id is not None:
+            response = list_function(parent_entity_ext_id,_page=page,_limit=limit,_filter=query_filter,_select=select)
+        else:
+            response = list_function(_page=page,_limit=limit,_filter=query_filter,_select=select)
+        return response
+    except module.rest.ApiException as e:
+        error_status = f"HTTP {e.status}" if hasattr(e, 'status') else "Unknown HTTP Status"
+        error_reason = f" - {e.reason}" if hasattr(e, 'reason') else ""
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] API Exception in {function} (page {page}): {error_status}{error_reason}{PrintColors.RESET}")
+        raise
+    except Exception as e:
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Unexpected error in {function} (page {page}): {type(e).__name__}: {str(e)}{PrintColors.RESET}")
+        raise
 
 
 def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_entity_ext_id=None,query_filter=None,select='*'):
@@ -3650,13 +3665,20 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
                                 else:
                                     entity_list.append(entities.data)
                         except module.rest.ApiException as e:
-                            error_data = json.loads(e.body)
-                            for error in error_data['data']['error']:
-                                #print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {type(e)} '{error['$objectType']}' {error['code']}: {error['message']} {PrintColors.RESET}")
-                                error_message = f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {type(e)} '{error['$objectType']}' {error['code']}: {error['message']} {PrintColors.RESET}"
+                            error_status = f"HTTP {e.status}" if hasattr(e, 'status') else "Unknown Status"
+                            error_reason = f" - {e.reason}" if hasattr(e, 'reason') else ""
+                            try:
+                                error_data = json.loads(e.body)
+                                for error in error_data['data']['error']:
+                                    error_message = f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {error_status}{error_reason} | '{error.get('$objectType', 'N/A')}' {error.get('code', 'N/A')}: {error.get('message', 'N/A')} {PrintColors.RESET}"
+                                    error_list.append(error_message)
+                            except (json.JSONDecodeError, KeyError, TypeError) as parse_error:
+                                error_message = f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {error_status}{error_reason} | Could not parse error details: {type(e).__name__} {PrintColors.RESET}"
                                 error_list.append(error_message)
                         except Exception as e:
-                            print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Task failed: {e}{PrintColors.RESET}")
+                            error_message = f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Task failed with {type(e).__name__}: {str(e)} {PrintColors.RESET}"
+                            error_list.append(error_message)
+                            print(error_message)
             else:
                 with tqdm.tqdm(total=page_count, desc=f"{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching pages {function} in {module_entity_api}") as progress_bar:
                     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -3681,19 +3703,34 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
                                     else:
                                         entity_list.append(entities.data)
                             except module.rest.ApiException as e:
-                                error_data = json.loads(e.body)
-                                for error in error_data['data']['error']:
-                                    #print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {type(e)} '{error['$objectType']}' {error['code']}: {error['message']} {PrintColors.RESET}")
-                                    error_message = f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {type(e)} '{error['$objectType']}' {error['code']}: {error['message']} {PrintColors.RESET}"
+                                error_status = f"HTTP {e.status}" if hasattr(e, 'status') else "Unknown Status"
+                                error_reason = f" - {e.reason}" if hasattr(e, 'reason') else ""
+                                try:
+                                    error_data = json.loads(e.body)
+                                    for error in error_data['data']['error']:
+                                        error_message = f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {error_status}{error_reason} | '{error.get('$objectType', 'N/A')}' {error.get('code', 'N/A')}: {error.get('message', 'N/A')} {PrintColors.RESET}"
+                                        error_list.append(error_message)
+                                except (json.JSONDecodeError, KeyError, TypeError) as parse_error:
+                                    error_message = f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {error_status}{error_reason} | Could not parse error details: {type(e).__name__} {PrintColors.RESET}"
                                     error_list.append(error_message)
                             except Exception as e:
-                                print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Task failed: {e}{PrintColors.RESET}")
+                                error_message = f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Task failed with {type(e).__name__}: {str(e)} {PrintColors.RESET}"
+                                error_list.append(error_message)
+                                print(error_message)
                             finally:
                                 progress_bar.update(1)
     else:
         print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] No entities found for {function} in {module_entity_api}!{PrintColors.RESET}")
-    for error in error_list:
-        print(error)
+    
+    # Print error summary if there were any errors
+    if error_list:
+        print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [SUMMARY] {function} had {len(error_list)} error(s):{PrintColors.RESET}")
+        for error in error_list:
+            print(error)
+    
+    if entity_list:
+        print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] {function} fetched {len(entity_list)} entities successfully{PrintColors.RESET}")
+    
     return entity_list
 
 
