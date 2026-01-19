@@ -3586,15 +3586,16 @@ def get_entities_batch(api_server, username, password, offset, entity_type, enti
         return []
 
 
-def v4_api_call_with_retry(api_function, max_retries=5, initial_sleep_seconds=2, backoff_multiplier=2, *args, **kwargs):
+def v4_api_call_with_retry(api_function, parent_entity_ext_id=None, max_retries=5, initial_sleep_seconds=2, backoff_multiplier=2, **kwargs):
     '''Helper function to retry API calls with exponential backoff.
         Handles transient errors (5xx, rate limits, etc).
         Args:
             api_function: The API function to call
+            parent_entity_ext_id: Optional parent entity ID for nested API calls
             max_retries: Maximum number of retry attempts (default: 5)
             initial_sleep_seconds: Initial sleep time between retries (default: 2)
             backoff_multiplier: Multiplier for exponential backoff (default: 2)
-            *args, **kwargs: Arguments to pass to api_function
+            **kwargs: Keyword arguments to pass to api_function (_page, _limit, etc)
         Returns:
             The response from the API call
     '''
@@ -3603,7 +3604,10 @@ def v4_api_call_with_retry(api_function, max_retries=5, initial_sleep_seconds=2,
     
     while retries_left >= 0:
         try:
-            return api_function(*args, **kwargs)
+            if parent_entity_ext_id is not None:
+                return api_function(parent_entity_ext_id, **kwargs)
+            else:
+                return api_function(**kwargs)
         except Exception as e:
             # Check if this is a transient error worth retrying
             is_transient = False
@@ -3680,29 +3684,17 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
     
     # Fetch metadata with retry logic to handle transient errors
     try:
-        if parent_entity_ext_id is not None:
-            response = v4_api_call_with_retry(
-                list_function,
-                max_retries=5,
-                initial_sleep_seconds=2,
-                backoff_multiplier=2,
-                parent_entity_ext_id,
-                _page=0,
-                _limit=1,
-                _filter=query_filter,
-                _select=select
-            )
-        else:
-            response = v4_api_call_with_retry(
-                list_function,
-                max_retries=5,
-                initial_sleep_seconds=2,
-                backoff_multiplier=2,
-                _page=0,
-                _limit=1,
-                _filter=query_filter,
-                _select=select
-            )
+        response = v4_api_call_with_retry(
+            list_function,
+            parent_entity_ext_id=parent_entity_ext_id,
+            max_retries=5,
+            initial_sleep_seconds=2,
+            backoff_multiplier=2,
+            _page=0,
+            _limit=1,
+            _filter=query_filter,
+            _select=select
+        )
     except Exception as e:
         error_status = f"HTTP {e.status}" if hasattr(e, 'status') else "Unknown Status"
         error_reason = f" - {e.reason}" if hasattr(e, 'reason') else ""
