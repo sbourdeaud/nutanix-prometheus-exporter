@@ -3586,7 +3586,50 @@ def get_entities_batch(api_server, username, password, offset, entity_type, enti
         return []
 
 
+def v4_api_call_with_retry(api_function, max_retries=5, initial_sleep_seconds=2, backoff_multiplier=2, *args, **kwargs):
+    '''Helper function to retry API calls with exponential backoff.
+        Handles transient errors (5xx, rate limits, etc).
+        Args:
+            api_function: The API function to call
+            max_retries: Maximum number of retry attempts (default: 5)
+            initial_sleep_seconds: Initial sleep time between retries (default: 2)
+            backoff_multiplier: Multiplier for exponential backoff (default: 2)
+            *args, **kwargs: Arguments to pass to api_function
+        Returns:
+            The response from the API call
+    '''
+    retries_left = max_retries
+    sleep_seconds = initial_sleep_seconds
+    
+    while retries_left >= 0:
+        try:
+            return api_function(*args, **kwargs)
+        except Exception as e:
+            # Check if this is a transient error worth retrying
+            is_transient = False
+            http_status = None
+            
+            if hasattr(e, 'status'):
+                http_status = e.status
+                # Retry on 5xx errors and rate limit (429)
+                if http_status >= 500 or http_status == 429:
+                    is_transient = True
+            
+            if not is_transient or retries_left == 0:
+                # Not transient or out of retries - raise the exception
+                raise
+            
+            # Log the retry attempt
+            error_msg = f"HTTP {http_status}" if http_status else str(e)
+            print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [RETRY] Transient error ({error_msg}) - retrying in {sleep_seconds}s ({retries_left} attempts left)...{PrintColors.RESET}")
+            
+            time.sleep(sleep_seconds)
+            sleep_seconds *= backoff_multiplier
+            retries_left -= 1
+
+
 def v4_get_entities(client,module,entity_api,function,page,limit=50,parent_entity_ext_id=None,query_filter=None,select='*'):
+
     '''v4_get_entities function.
         Args:
             client: a v4 Python SDK client object.
@@ -3634,10 +3677,38 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
         print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Using {function} in {module_entity_api}...{PrintColors.RESET}") """
     entity_list=[]
     error_list=[]
-    if parent_entity_ext_id is not None:
-        response = list_function(parent_entity_ext_id,_page=0,_limit=1,_filter=query_filter,_select=select)
-    else:
-        response = list_function(_page=0,_limit=1,_filter=query_filter,_select=select)
+    
+    # Fetch metadata with retry logic to handle transient errors
+    try:
+        if parent_entity_ext_id is not None:
+            response = v4_api_call_with_retry(
+                list_function,
+                max_retries=5,
+                initial_sleep_seconds=2,
+                backoff_multiplier=2,
+                parent_entity_ext_id,
+                _page=0,
+                _limit=1,
+                _filter=query_filter,
+                _select=select
+            )
+        else:
+            response = v4_api_call_with_retry(
+                list_function,
+                max_retries=5,
+                initial_sleep_seconds=2,
+                backoff_multiplier=2,
+                _page=0,
+                _limit=1,
+                _filter=query_filter,
+                _select=select
+            )
+    except Exception as e:
+        error_status = f"HTTP {e.status}" if hasattr(e, 'status') else "Unknown Status"
+        error_reason = f" - {e.reason}" if hasattr(e, 'reason') else ""
+        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Failed to fetch metadata after retries for {function} in {module_entity_api}: {error_status}{error_reason}{PrintColors.RESET}")
+        return entity_list  # Return empty list and continue
+    
     total_available_results=response.metadata.total_available_results
     if total_available_results:
         page_count = math.ceil(total_available_results/limit)
