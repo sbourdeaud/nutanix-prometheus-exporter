@@ -494,9 +494,16 @@ class NutanixMetrics:
             loop_start_time = datetime.now(timezone.utc)
             self.fetch()
             loop_end_time = datetime.now(timezone.utc)
+            execution_time = (loop_end_time - loop_start_time).total_seconds()
             print(f"{PrintColors.STEP}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [STEP] Fetching all metrics took {format_timespan(loop_end_time - loop_start_time)}!{PrintColors.RESET}")
-            print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Waiting for {self.polling_interval_seconds} seconds...{PrintColors.RESET}")
-            time.sleep(self.polling_interval_seconds)
+            
+            # Skip waiting if execution time already exceeds polling interval
+            if execution_time >= self.polling_interval_seconds:
+                print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Execution time ({execution_time:.2f}s) exceeds polling interval ({self.polling_interval_seconds}s). Skipping wait and immediately iterating.{PrintColors.RESET}")
+            else:
+                wait_time = self.polling_interval_seconds - execution_time
+                print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Waiting for {wait_time:.2f} seconds...{PrintColors.RESET}")
+                time.sleep(wait_time)
 
 
     def fetch(self):
@@ -511,6 +518,14 @@ class NutanixMetrics:
         #initialize variables
         cluster_list, host_list, storage_container_list, disk_list, subnet_list, layer2_stretch_list, load_balancer_sessions_list, traffic_mirrors_list, vpc_list, vpn_connection_list, vms_list, files_server_list, object_store_list, volume_group_list = ([] for i in range(14))
 
+        #initialize timing tracking for API endpoints
+        endpoint_timings = {}
+        endpoint_errors = {}
+
+        #helper function to register an endpoint for tracking
+        def register_endpoint(name):
+            if name not in endpoint_errors:
+                endpoint_errors[name] = 0
 
         #region #?prism_central
         if self.prism_central_metrics:
@@ -525,16 +540,28 @@ class NutanixMetrics:
 
             #region vg
             if self.volumes_metrics:
-                volumes_client = v4_init_api_client(module='ntnx_volumes_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-                volume_group_list = v4_get_all_entities(module=ntnx_volumes_py_client,client=volumes_client,function='list_volume_groups',limit=limit,module_entity_api='VolumeGroupsApi')
-                self.__dict__["nutanix_count_vg"].labels(entity=prism_central_hostname).set(len(volume_group_list))
-                self.__dict__["nutanix_count_vg_shared"].labels(entity=prism_central_hostname).set(len([vg for vg in volume_group_list if getattr(vg, "sharing_status", None) == 'SHARED']))
-                self.__dict__["nutanix_count_vg_not_shared"].labels(entity=prism_central_hostname).set(len([vg for vg in volume_group_list if getattr(vg, "sharing_status", None) == 'NOT_SHARED']))
+                endpoint_errors['Prism Central - Volume Groups'] = 0
+                try:
+                    _endpoint_start = time.time()
+                    volumes_client = v4_init_api_client(module='ntnx_volumes_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
+                    # Optimized: Select only necessary fields to reduce payload size
+                    volume_group_list = v4_get_all_entities(module=ntnx_volumes_py_client,client=volumes_client,function='list_volume_groups',limit=limit,module_entity_api='VolumeGroupsApi',select='extId,sharingStatus',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Volume Groups')
+                    self.__dict__["nutanix_count_vg"].labels(entity=prism_central_hostname).set(len(volume_group_list))
+                    self.__dict__["nutanix_count_vg_shared"].labels(entity=prism_central_hostname).set(len([vg for vg in volume_group_list if getattr(vg, "sharing_status", None) == 'SHARED']))
+                    self.__dict__["nutanix_count_vg_not_shared"].labels(entity=prism_central_hostname).set(len([vg for vg in volume_group_list if getattr(vg, "sharing_status", None) == 'NOT_SHARED']))
+                    endpoint_timings['Prism Central - Volume Groups'] = time.time() - _endpoint_start
+                    register_endpoint('Prism Central - Volume Groups')
+                except Exception as e:
+                    endpoint_errors['Prism Central - Volume Groups'] += 1
+                    print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Error fetching Volume Groups: {e}{PrintColors.RESET}")
             #endregion vg
 
             #region vm
+            endpoint_errors['Prism Central - VMs'] = 0
+            _endpoint_start = time.time()
             vmm_client = v4_init_api_client(module='ntnx_vmm_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-            vms_list = v4_get_all_entities(module=ntnx_vmm_py_client,client=vmm_client,function='list_vms',limit=limit,module_entity_api='VmApi')
+            # Optimized: Select only necessary fields to reduce payload size
+            vms_list = v4_get_all_entities(module=ntnx_vmm_py_client,client=vmm_client,function='list_vms',limit=limit,module_entity_api='VmApi',select='extId,name,powerState,bootConfig,gpus,protectionType,numSockets,numCoresPerSocket,memorySizeBytes,disks,nics,guestTools,cluster,host',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - VMs')
             self.__dict__["nutanix_count_vm"].labels(entity=prism_central_hostname).set(len(vms_list))
             self.__dict__["nutanix_count_vm_on"].labels(entity=prism_central_hostname).set(len([vm for vm in vms_list if vm.power_state == 'ON']))
             self.__dict__["nutanix_count_vm_off"].labels(entity=prism_central_hostname).set(len([vm for vm in vms_list if vm.power_state == 'OFF']))
@@ -556,31 +583,43 @@ class NutanixMetrics:
             self.__dict__["nutanix_count_ngt_enabled"].labels(entity=prism_central_hostname).set(len([vm for vm in vms_with_ngt if vm.guest_tools.is_enabled is True]))
             self.__dict__["nutanix_count_ngt_reachable"].labels(entity=prism_central_hostname).set(len([vm for vm in vms_with_ngt if vm.guest_tools.is_reachable is True]))
             self.__dict__["nutanix_count_ngt_vss_snapshot_capable"].labels(entity=prism_central_hostname).set(len([vm for vm in vms_with_ngt if vm.guest_tools.is_vss_snapshot_capable is True])),
+            endpoint_timings['Prism Central - VMs'] = time.time() - _endpoint_start
+            register_endpoint('Prism Central - VMs')
             #endregion vm
 
             #region cluster
-            clustermgmt_client = v4_init_api_client(module='ntnx_clustermgmt_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-            cluster_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_clusters',limit=limit,module_entity_api='ClustersApi')
-            self.__dict__["nutanix_count_cluster"].labels(entity=prism_central_hostname).set(len([cluster for cluster in cluster_list if 'PRISM_CENTRAL' not in cluster.config.cluster_function]))
+            # cluster_list will be fetched in Cluster Stats section
             #endregion cluster
 
             #region host
+            endpoint_errors['Prism Central - Hosts'] = 0
+            _endpoint_start = time.time()
             clustermgmt_client = v4_init_api_client(module='ntnx_clustermgmt_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-            host_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_hosts',limit=limit,module_entity_api='ClustersApi')
+            # Optimized: Select only necessary fields to reduce payload size
+            host_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_hosts',limit=limit,module_entity_api='ClustersApi',select='extId,hostName,cluster',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Hosts')
             self.__dict__["nutanix_count_node"].labels(entity=prism_central_hostname).set(len(host_list))
+            endpoint_timings['Prism Central - Hosts'] = time.time() - _endpoint_start
+            register_endpoint('Prism Central - Hosts')
             #endregion host
 
             #region storage_container
+            endpoint_errors['Prism Central - Storage Containers'] = 0
+            _endpoint_start = time.time()
             clustermgmt_client = v4_init_api_client(module='ntnx_clustermgmt_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-            storage_container_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_storage_containers',limit=limit,module_entity_api='StorageContainersApi')
+            # Optimized: Select only necessary fields to reduce payload size (includes name and clusterName for stats section)
+            storage_container_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_storage_containers',limit=limit,module_entity_api='StorageContainersApi',select='extId,name,isEncrypted,replicationFactor,clusterExtId,clusterName',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Storage Containers')
             self.__dict__["nutanix_count_storage_container"].labels(entity=prism_central_hostname).set(len(storage_container_list))
             self.__dict__["nutanix_count_storage_container_encrypted"].labels(entity=prism_central_hostname).set(len([storage_container for storage_container in storage_container_list if storage_container.is_encrypted is True]))
             self.__dict__["nutanix_count_storage_container_rf1"].labels(entity=prism_central_hostname).set(len([storage_container for storage_container in storage_container_list if storage_container.replication_factor == 1]))
             self.__dict__["nutanix_count_storage_container_rf2"].labels(entity=prism_central_hostname).set(len([storage_container for storage_container in storage_container_list if storage_container.replication_factor == 2]))
             self.__dict__["nutanix_count_storage_container_rf3"].labels(entity=prism_central_hostname).set(len([storage_container for storage_container in storage_container_list if storage_container.replication_factor == 3]))
+            endpoint_timings['Prism Central - Storage Containers'] = time.time() - _endpoint_start
+            register_endpoint('Prism Central - Storage Containers')
             #endregion storage_container
 
             #region networking
+            endpoint_errors['Prism Central - Networking'] = 0
+            _endpoint_start = time.time()
             networking_client = v4_init_api_client(module='ntnx_networking_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
 
             subnet_list = v4_get_all_subnets(client=networking_client,limit=limit)
@@ -592,56 +631,65 @@ class NutanixMetrics:
             self.__dict__["nutanix_count_subnet_external"].labels(entity=prism_central_hostname).set(len([subnet for subnet in subnet_list if subnet.is_external is True]))
 
             if self.networking_metrics:
-                vpc_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_vpcs',limit=limit,module_entity_api='VpcsApi')
+                # Optimized: Select only extId for count-only queries
+                vpc_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_vpcs',limit=limit,module_entity_api='VpcsApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Networking')
                 self.__dict__["nutanix_count_vpc"].labels(entity=prism_central_hostname).set(len(vpc_list))
 
-                bgp_session_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_bgp_sessions',limit=limit,module_entity_api='BgpSessionsApi')
+                bgp_session_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_bgp_sessions',limit=limit,module_entity_api='BgpSessionsApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Networking')
                 self.__dict__["nutanix_count_bgp_session"].labels(entity=prism_central_hostname).set(len(bgp_session_list))
 
-                gateway_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_gateways',limit=limit,module_entity_api='GatewaysApi')
+                gateway_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_gateways',limit=limit,module_entity_api='GatewaysApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Networking')
                 self.__dict__["nutanix_count_gateway"].labels(entity=prism_central_hostname).set(len(gateway_list))
 
-                layer2_stretch_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_layer2_stretches',limit=limit,module_entity_api='Layer2StretchesApi')
+                layer2_stretch_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_layer2_stretches',limit=limit,module_entity_api='Layer2StretchesApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Networking')
                 self.__dict__["nutanix_count_layer2_stretch"].labels(entity=prism_central_hostname).set(len(layer2_stretch_list))
 
                 #! this is causing too much latency, so removing it for now
                 """ load_balancer_sessions_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_load_balancer_sessions',limit=limit,module_entity_api='LoadBalancerSessionsApi')
                 self.__dict__["nutanix_count_load_balancer_session"].labels(entity=prism_central_hostname).set(len(load_balancer_sessions_list)) """
 
-                traffic_mirrors_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_traffic_mirrors',limit=limit,module_entity_api='TrafficMirrorsApi')
+                traffic_mirrors_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_traffic_mirrors',limit=limit,module_entity_api='TrafficMirrorsApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Networking')
                 self.__dict__["nutanix_count_traffic_mirror"].labels(entity=prism_central_hostname).set(len(traffic_mirrors_list))
 
-                network_controller_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_network_controllers',limit=limit,module_entity_api='NetworkControllersApi')
+                network_controller_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_network_controllers',limit=limit,module_entity_api='NetworkControllersApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Networking')
                 self.__dict__["nutanix_count_network_controller"].labels(entity=prism_central_hostname).set(len(network_controller_list))
 
-                routing_policy_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_routing_policies',limit=limit,module_entity_api='RoutingPoliciesApi')
+                routing_policy_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_routing_policies',limit=limit,module_entity_api='RoutingPoliciesApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Networking')
                 self.__dict__["nutanix_count_routing_policy"].labels(entity=prism_central_hostname).set(len(routing_policy_list))
 
-                uplink_bond_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_uplink_bonds',limit=limit,module_entity_api='UplinkBondsApi')
+                uplink_bond_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_uplink_bonds',limit=limit,module_entity_api='UplinkBondsApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Networking')
                 self.__dict__["nutanix_count_uplink_bond"].labels(entity=prism_central_hostname).set(len(uplink_bond_list))
 
-                virtual_switch_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_virtual_switches',limit=limit,module_entity_api='VirtualSwitchesApi')
+                virtual_switch_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_virtual_switches',limit=limit,module_entity_api='VirtualSwitchesApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Networking')
                 self.__dict__["nutanix_count_virtual_switch"].labels(entity=prism_central_hostname).set(len(virtual_switch_list))
 
-                vpn_connection_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_vpn_connections',limit=limit,module_entity_api='VpnConnectionsApi')
+                vpn_connection_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_vpn_connections',limit=limit,module_entity_api='VpnConnectionsApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Networking')
                 self.__dict__["nutanix_count_vpn_connection"].labels(entity=prism_central_hostname).set(len(vpn_connection_list))
+            endpoint_timings['Prism Central - Networking'] = time.time() - _endpoint_start
+            register_endpoint('Prism Central - Networking')
             #endregion networking
 
             #region files
             if self.files_metrics:
+                endpoint_errors['Prism Central - Files'] = 0
+                _endpoint_start = time.time()
                 files_client = v4_init_api_client(module='ntnx_files_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
 
-                files_server_list = v4_get_all_entities(module=ntnx_files_py_client,client=files_client,function='list_file_servers',limit=limit,module_entity_api='FileServersApi')
+                # Optimized: Select only extId for count-only queries
+                files_server_list = v4_get_all_entities(module=ntnx_files_py_client,client=files_client,function='list_file_servers',limit=limit,module_entity_api='FileServersApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Files')
                 self.__dict__["nutanix_count_files_server"].labels(entity=prism_central_hostname).set(len(files_server_list))
 
-                unified_namespace_list = v4_get_all_entities(module=ntnx_files_py_client,client=files_client,function='list_unified_namespaces',limit=limit,module_entity_api='UnifiedNamespacesApi')
+                unified_namespace_list = v4_get_all_entities(module=ntnx_files_py_client,client=files_client,function='list_unified_namespaces',limit=limit,module_entity_api='UnifiedNamespacesApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Files')
                 self.__dict__["nutanix_count_files_unified_namespace"].labels(entity=prism_central_hostname).set(len(unified_namespace_list))
+                endpoint_timings['Prism Central - Files'] = time.time() - _endpoint_start
+                register_endpoint('Prism Central - Files')
             #endregion files
 
             #region object
             if self.object_metrics:
                 objects_client = v4_init_api_client(module='ntnx_objects_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-                object_store_list = v4_get_all_entities(module=ntnx_objects_py_client,client=objects_client,function='list_objectstores',limit=limit,module_entity_api='ObjectStoresApi')
+                # Optimized: Select only extId for count-only queries
+                object_store_list = v4_get_all_entities(module=ntnx_objects_py_client,client=objects_client,function='list_objectstores',limit=limit,module_entity_api='ObjectStoresApi',select='extId')
                 self.__dict__["nutanix_count_objects_object_stores"].labels(entity=prism_central_hostname).set(len(object_store_list))
             #endregion object
 
@@ -656,40 +704,63 @@ class NutanixMetrics:
             #endregion categories
 
             #region tasks
-            print(f"{PrintColors.DATA}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching tasks count...{PrintColors.RESET}")
             tasks_api_instance = ntnx_prism_py_client.TasksApi(prism_client)
-            task_count = tasks_api_instance.list_tasks(_limit=1,_select='status').metadata.total_available_results
-            self.__dict__["nutanix_count_task"].labels(entity=prism_central_hostname).set(task_count)
-            task_running_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'RUNNING'").metadata.total_available_results
-            self.__dict__["nutanix_count_task_running"].labels(entity=prism_central_hostname).set(task_running_count)
-            task_queued_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'QUEUED'").metadata.total_available_results
-            self.__dict__["nutanix_count_task_queued"].labels(entity=prism_central_hostname).set(task_queued_count)
-            task_canceling_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'CANCELING'").metadata.total_available_results
-            self.__dict__["nutanix_count_task_canceling"].labels(entity=prism_central_hostname).set(task_canceling_count)
-            task_succeeded_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'SUCCEEDED'").metadata.total_available_results
-            self.__dict__["nutanix_count_task_succeeded"].labels(entity=prism_central_hostname).set(task_succeeded_count)
-            task_failed_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'FAILED'").metadata.total_available_results
-            self.__dict__["nutanix_count_task_failed"].labels(entity=prism_central_hostname).set(task_failed_count)
-            task_canceled_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'CANCELED'").metadata.total_available_results
-            self.__dict__["nutanix_count_task_canceled"].labels(entity=prism_central_hostname).set(task_canceled_count)
-            task_suspended_count = tasks_api_instance.list_tasks(_limit=1,_select='status',_filter="status eq Prism.Config.TaskStatus'SUSPENDED'").metadata.total_available_results
-            self.__dict__["nutanix_count_task_suspended"].labels(entity=prism_central_hostname).set(task_suspended_count)
+            task_queries = [
+                ('total', None, 'nutanix_count_task'),
+                ('running', "status eq Prism.Config.TaskStatus'RUNNING'", 'nutanix_count_task_running'),
+                ('queued', "status eq Prism.Config.TaskStatus'QUEUED'", 'nutanix_count_task_queued'),
+                ('canceling', "status eq Prism.Config.TaskStatus'CANCELING'", 'nutanix_count_task_canceling'),
+                ('succeeded', "status eq Prism.Config.TaskStatus'SUCCEEDED'", 'nutanix_count_task_succeeded'),
+                ('failed', "status eq Prism.Config.TaskStatus'FAILED'", 'nutanix_count_task_failed'),
+                ('canceled', "status eq Prism.Config.TaskStatus'CANCELED'", 'nutanix_count_task_canceled'),
+                ('suspended', "status eq Prism.Config.TaskStatus'SUSPENDED'", 'nutanix_count_task_suspended')
+            ]
+            total_task_count = 0
+            with tqdm.tqdm(total=len(task_queries), desc=f"{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching tasks count") as progress_bar:
+                for task_type, task_filter, metric_key in task_queries:
+                    try:
+                        if task_filter:
+                            task_count = tasks_api_instance.list_tasks(_limit=1, _select='status', _filter=task_filter).metadata.total_available_results
+                        else:
+                            task_count = tasks_api_instance.list_tasks(_limit=1, _select='status').metadata.total_available_results
+                        self.__dict__[metric_key].labels(entity=prism_central_hostname).set(task_count)
+                        # Store total count from the 'total' query (first query with no filter)
+                        if task_type == 'total':
+                            total_task_count = task_count
+                    except Exception as e:
+                        print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Error fetching task count for {task_type}: {e}{PrintColors.RESET}")
+                    finally:
+                        progress_bar.update(1)
+            print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] list_tasks fetched {total_task_count} entities successfully{PrintColors.RESET}")
             #endregion tasks
 
             #region monitoring
             monitoring_client = v4_init_api_client(module='ntnx_monitoring_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
 
             #region alert
-            print(f"{PrintColors.DATA}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching alerts count...{PrintColors.RESET}")
             alerts_api_instance = ntnx_monitoring_py_client.AlertsApi(monitoring_client)
-            alerts_not_resolved_count = alerts_api_instance.list_alerts(_limit=1,_select='isResolved,severity',_filter="isResolved eq false").metadata.total_available_results
-            self.__dict__["nutanix_count_monitoring_alert_not_resolved"].labels(entity=prism_central_hostname).set(alerts_not_resolved_count)
-            alerts_info_not_resolved_count = alerts_api_instance.list_alerts(_limit=1,_select='isResolved,severity',_filter="isResolved eq false and severity eq Monitoring.Common.Severity'INFO'").metadata.total_available_results
-            self.__dict__["nutanix_count_monitoring_alert_info_not_resolved"].labels(entity=prism_central_hostname).set(alerts_info_not_resolved_count)
-            alerts_warning_not_resolved_count = alerts_api_instance.list_alerts(_limit=1,_select='isResolved,severity',_filter="isResolved eq false and severity eq Monitoring.Common.Severity'WARNING'").metadata.total_available_results
-            self.__dict__["nutanix_count_monitoring_alert_warning_not_resolved"].labels(entity=prism_central_hostname).set(alerts_warning_not_resolved_count)
-            alerts_critical_not_resolved_count = alerts_api_instance.list_alerts(_limit=1,_select='isResolved,severity',_filter="isResolved eq false and severity eq Monitoring.Common.Severity'CRITICAL'").metadata.total_available_results
-            self.__dict__["nutanix_count_monitoring_alert_critical_not_resolved"].labels(entity=prism_central_hostname).set(alerts_critical_not_resolved_count)
+            alert_queries = [
+                ('not_resolved', "isResolved eq false", 'nutanix_count_monitoring_alert_not_resolved'),
+                ('info_not_resolved', "isResolved eq false and severity eq Monitoring.Common.Severity'INFO'", 'nutanix_count_monitoring_alert_info_not_resolved'),
+                ('warning_not_resolved', "isResolved eq false and severity eq Monitoring.Common.Severity'WARNING'", 'nutanix_count_monitoring_alert_warning_not_resolved'),
+                ('critical_not_resolved', "isResolved eq false and severity eq Monitoring.Common.Severity'CRITICAL'", 'nutanix_count_monitoring_alert_critical_not_resolved')
+            ]
+            total_alert_count = 0
+            with tqdm.tqdm(total=len(alert_queries), desc=f"{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching alerts count") as progress_bar:
+                for alert_type, alert_filter, metric_key in alert_queries:
+                    try:
+                        alert_count = alerts_api_instance.list_alerts(_limit=1, _select='isResolved,severity', _filter=alert_filter).metadata.total_available_results
+                        self.__dict__[metric_key].labels(entity=prism_central_hostname).set(alert_count)
+                    except Exception as e:
+                        print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Error fetching alert count for {alert_type}: {e}{PrintColors.RESET}")
+                    finally:
+                        progress_bar.update(1)
+            # Fetch total alert count (all alerts, resolved and unresolved)
+            try:
+                total_alert_count = alerts_api_instance.list_alerts(_limit=1, _select='isResolved,severity').metadata.total_available_results
+            except Exception as e:
+                print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Error fetching total alert count: {e}{PrintColors.RESET}")
+            print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] list_alerts fetched {total_alert_count} entities successfully{PrintColors.RESET}")
             #endregion alert
 
             #region audit
@@ -704,8 +775,18 @@ class NutanixMetrics:
             #endregion monitoring
 
             #region protection policies
-            datapolicies_client = v4_init_api_client(module='ntnx_datapolicies_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-            protection_policy_list = v4_get_all_entities(module=ntnx_datapolicies_py_client,client=datapolicies_client,function='list_protection_policies',limit=limit,module_entity_api='ProtectionPoliciesApi')
+            endpoint_errors['Protection Policies'] = 0
+            _endpoint_start = time.time()
+            try:
+                datapolicies_client = v4_init_api_client(module='ntnx_datapolicies_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
+                # Optimized: Select only necessary fields to reduce payload size
+                protection_policy_list = v4_get_all_entities(module=ntnx_datapolicies_py_client,client=datapolicies_client,function='list_protection_policies',limit=limit,module_entity_api='ProtectionPoliciesApi',select='extId,replicationConfigurations',endpoint_errors_dict=endpoint_errors,endpoint_name='Protection Policies')
+                endpoint_timings['Protection Policies'] = time.time() - _endpoint_start
+                register_endpoint('Protection Policies')
+            except Exception as e:
+                endpoint_errors['Protection Policies'] += 1
+                protection_policy_list = []
+                print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Error fetching Protection Policies: {e}{PrintColors.RESET}")
             self.__dict__["nutanix_count_protection_policy"].labels(entity=prism_central_hostname).set(len(protection_policy_list))
             #! from now on we're dividing by 2 because in the API, a replication configuration between 2 locations is in fact a single configuration created by the user
             self.__dict__["nutanix_count_protection_policy_schedule"].labels(entity=prism_central_hostname).set(sum([math.ceil(len(protection_policy.replication_configurations)/2) for protection_policy in protection_policy_list]))
@@ -789,7 +870,16 @@ class NutanixMetrics:
             self.__dict__["nutanix_count_dr_protected_entities_async"].labels(entity=prism_central_hostname).set(dr_protected_entities_async)
 
 
-            recovery_point_list = v4_get_all_entities(module=ntnx_dataprotection_py_client,client=dataprotection_client,function='list_recovery_points',limit=limit,module_entity_api='RecoveryPointsApi')
+            endpoint_errors['Recovery Points'] = 0
+            _recovery_points_start = time.time()
+            try:
+                recovery_point_list = v4_get_all_entities(module=ntnx_dataprotection_py_client,client=dataprotection_client,function='list_recovery_points',limit=limit,module_entity_api='RecoveryPointsApi',select='recoveryPointType,vmRecoveryPoints,volumeGroupRecoveryPoints',endpoint_errors_dict=endpoint_errors,endpoint_name='Recovery Points')
+            except Exception as e:
+                endpoint_errors['Recovery Points'] += 1
+                print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Error fetching Recovery Points: {e}{PrintColors.RESET}")
+                recovery_point_list = []
+            endpoint_timings['Recovery Points'] = time.time() - _recovery_points_start
+            register_endpoint('Recovery Points')
             self.__dict__["nutanix_count_dr_recovery_points"].labels(entity=prism_central_hostname).set(len(recovery_point_list))
             self.__dict__["nutanix_count_dr_recovery_points_vm"].labels(entity=prism_central_hostname).set(sum([len([vm_recovery_point for vm_recovery_point in recovery_point.vm_recovery_points]) for recovery_point in recovery_point_list if recovery_point and recovery_point.vm_recovery_points]))
             self.__dict__["nutanix_count_dr_recovery_points_vg"].labels(entity=prism_central_hostname).set(sum([len([vg_recovery_point for vg_recovery_point in recovery_point.volume_group_recovery_points]) for recovery_point in recovery_point_list if recovery_point and recovery_point.volume_group_recovery_points]))
@@ -801,7 +891,17 @@ class NutanixMetrics:
             if self.microseg_metrics:
                 microseg_client = v4_init_api_client(module='ntnx_microseg_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
 
-                network_security_policy_list = v4_get_all_entities(module=ntnx_microseg_py_client,client=microseg_client,function='list_network_security_policies',limit=limit,module_entity_api='NetworkSecurityPoliciesApi')
+                endpoint_errors['Microseg - Network Security Policies'] = 0
+                _endpoint_start = time.time()
+                try:
+                    # Optimized: Select only necessary fields to reduce payload size
+                    network_security_policy_list = v4_get_all_entities(module=ntnx_microseg_py_client,client=microseg_client,function='list_network_security_policies',limit=limit,module_entity_api='NetworkSecurityPoliciesApi',select='extId,scope,state,type',endpoint_errors_dict=endpoint_errors,endpoint_name='Microseg - Network Security Policies')
+                    endpoint_timings['Microseg - Network Security Policies'] = time.time() - _endpoint_start
+                    register_endpoint('Microseg - Network Security Policies')
+                except Exception as e:
+                    endpoint_errors['Microseg - Network Security Policies'] += 1
+                    network_security_policy_list = []
+                    print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Error fetching Network Security Policies: {e}{PrintColors.RESET}")
                 self.__dict__["nutanix_count_microseg_network_security_policy"].labels(entity=prism_central_hostname).set(len(network_security_policy_list))
                 self.__dict__["nutanix_count_microseg_network_security_policy_vlan"].labels(entity=prism_central_hostname).set(len([policy for policy in network_security_policy_list if policy.scope in ['ALL_VLAN']]))
                 self.__dict__["nutanix_count_microseg_network_security_policy_vpc"].labels(entity=prism_central_hostname).set(len([policy for policy in network_security_policy_list if policy.scope in ['ALL_VPC','VPC_LIST']]))
@@ -850,13 +950,32 @@ class NutanixMetrics:
                 network_security_policy_rule_list = entity_list
                 self.__dict__["nutanix_count_microseg_network_security_policy_rule"].labels(entity=prism_central_hostname).set(len(network_security_policy_rule_list)) """
                 
-                address_group_list = v4_get_all_entities(module=ntnx_microseg_py_client,client=microseg_client,function='list_address_groups',limit=limit,module_entity_api='AddressGroupsApi')
+                endpoint_errors['Microseg - Address Groups'] = 0
+                _endpoint_start = time.time()
+                try:
+                    # Optimized: Select only extId for count-only queries
+                    address_group_list = v4_get_all_entities(module=ntnx_microseg_py_client,client=microseg_client,function='list_address_groups',limit=limit,module_entity_api='AddressGroupsApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Microseg - Address Groups')
+                    endpoint_timings['Microseg - Address Groups'] = time.time() - _endpoint_start
+                    register_endpoint('Microseg - Address Groups')
+                except Exception as e:
+                    endpoint_errors['Microseg - Address Groups'] += 1
+                    address_group_list = []
+                    print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Error fetching Address Groups: {e}{PrintColors.RESET}")
                 self.__dict__["nutanix_count_microseg_address_group"].labels(entity=prism_central_hostname).set(len(address_group_list))
 
-                service_group_list = v4_get_all_entities(module=ntnx_microseg_py_client,client=microseg_client,function='list_service_groups',limit=limit,module_entity_api='ServiceGroupsApi')
+                endpoint_errors['Microseg - Service Groups'] = 0
+                _endpoint_start = time.time()
+                try:
+                    # Optimized: Select only extId for count-only queries
+                    service_group_list = v4_get_all_entities(module=ntnx_microseg_py_client,client=microseg_client,function='list_service_groups',limit=limit,module_entity_api='ServiceGroupsApi',select='extId',endpoint_errors_dict=endpoint_errors,endpoint_name='Microseg - Service Groups')
+                    endpoint_timings['Microseg - Service Groups'] = time.time() - _endpoint_start
+                    register_endpoint('Microseg - Service Groups')
+                except Exception as e:
+                    endpoint_errors['Microseg - Service Groups'] += 1
+                    service_group_list = []
+                    print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Error fetching Service Groups: {e}{PrintColors.RESET}")
                 self.__dict__["nutanix_count_microseg_service_group"].labels(entity=prism_central_hostname).set(len(service_group_list))
             #endregion microseg
-
         #endregion #?prism_central
 
 
@@ -866,7 +985,12 @@ class NutanixMetrics:
 
         #region #?clusters
         if self.cluster_metrics:
-            cluster_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_clusters',limit=limit,module_entity_api='ClustersApi')
+            endpoint_errors['Prism Central - Clusters'] = 0
+            _endpoint_start = time.time()
+            # Optimized: Select only necessary fields to reduce payload size
+            cluster_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_clusters',limit=limit,module_entity_api='ClustersApi',select='extId,name,config',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Clusters')
+            # Set cluster count metric
+            self.__dict__["nutanix_count_cluster"].labels(entity=prism_central_hostname).set(len([cluster for cluster in cluster_list if 'PRISM_CENTRAL' not in cluster.config.cluster_function]))
 
             #region stats
             #* get metrics for each cluster
@@ -919,6 +1043,8 @@ class NutanixMetrics:
                 key, entity, value = metric.split(':')
                 #print(f"key: {key}, entity: {entity}, value: {value}")
                 self.__dict__[key].labels(cluster=entity).set(value)
+            endpoint_timings['Prism Central - Clusters'] = time.time() - _endpoint_start
+            register_endpoint('Prism Central - Clusters')
             #endregion stats
 
             #region count
@@ -935,7 +1061,8 @@ class NutanixMetrics:
             #region vm
             if not vms_list:
                 vmm_client = v4_init_api_client(module='ntnx_vmm_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-                vms_list = v4_get_all_entities(module=ntnx_vmm_py_client,client=vmm_client,function='list_vms',limit=limit,module_entity_api='VmApi')
+                # Optimized: Select only necessary fields to reduce payload size
+                vms_list = v4_get_all_entities(module=ntnx_vmm_py_client,client=vmm_client,function='list_vms',limit=limit,module_entity_api='VmApi',select='extId,name,powerState,bootConfig,gpus,protectionType,numSockets,numCoresPerSocket,memorySizeBytes,disks,nics,guestTools,cluster,host')
             for cluster in cluster_list:
                 if 'PRISM_CENTRAL' not in cluster.config.cluster_function:
                     cluster_vms_list= [vm for vm in vms_list if vm.cluster.ext_id == cluster.ext_id]
@@ -965,7 +1092,8 @@ class NutanixMetrics:
             #region host
             if not host_list:
                 clustermgmt_client = v4_init_api_client(module='ntnx_clustermgmt_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-                host_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_hosts',limit=limit,module_entity_api='ClustersApi')
+                # Optimized: Select only necessary fields to reduce payload size
+                host_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_hosts',limit=limit,module_entity_api='ClustersApi',select='extId,hostName,cluster')
             for cluster in cluster_list:
                 if 'PRISM_CENTRAL' not in cluster.config.cluster_function:
                     cluster_hosts_list = [host for host in host_list if host.cluster.uuid == cluster.ext_id]
@@ -975,7 +1103,8 @@ class NutanixMetrics:
             #region storage_container
             if not storage_container_list:
                 clustermgmt_client = v4_init_api_client(module='ntnx_clustermgmt_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-                storage_container_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_storage_containers',limit=limit,module_entity_api='StorageContainersApi')
+                # Optimized: Select only necessary fields to reduce payload size (includes name and clusterName for stats section)
+                storage_container_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_storage_containers',limit=limit,module_entity_api='StorageContainersApi',select='extId,name,isEncrypted,replicationFactor,clusterExtId,clusterName')
             for cluster in cluster_list:
                 if 'PRISM_CENTRAL' not in cluster.config.cluster_function:
                     cluster_storage_containers_list = [storage_container for storage_container in storage_container_list if storage_container.cluster_ext_id == cluster.ext_id]
@@ -1016,11 +1145,14 @@ class NutanixMetrics:
 
         #region #?hosts
         if self.hosts_metrics:
+            _endpoint_start = time.time()
             if not host_list:
-                host_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_hosts',limit=limit,module_entity_api='ClustersApi')
+                # Optimized: Select only necessary fields to reduce payload size
+                host_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_hosts',limit=limit,module_entity_api='ClustersApi',select='extId,hostName,cluster')
 
             #region stats
             #* get metrics for each cluster
+            endpoint_errors['Host Stats'] = 0
             host_details_list = []
             metrics=[]
             error_list=[]
@@ -1055,12 +1187,14 @@ class NutanixMetrics:
                             else:
                                 metrics.append(entities)
                         except ntnx_clustermgmt_py_client.rest.ApiException as e:
+                            endpoint_errors['Host Stats'] += 1
                             error_data = json.loads(e.body)
                             for error in error_data['data']['error']:
                                 #print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {type(e)} '{error['$objectType']}' {error['code']}: {error['message']} {PrintColors.RESET}")
                                 error_message = f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] {type(e)} '{error['$objectType']}' {error['code']}: {error['message']} {PrintColors.RESET}"
                                 error_list.append(error_message)
                         except Exception as e:
+                            endpoint_errors['Host Stats'] += 1
                             print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Task failed: {e}{PrintColors.RESET}")
                         finally:
                             progress_bar.update(1)
@@ -1071,6 +1205,8 @@ class NutanixMetrics:
                 key, entity, value = metric.split(':')
                 #print(f"key: {key}, entity: {entity}, value: {value}")
                 self.__dict__[key].labels(host=entity).set(value)
+            endpoint_timings['Host Stats'] = time.time() - _endpoint_start
+            register_endpoint('Host Stats')
             #endregion stats
 
             #region count
@@ -1078,7 +1214,8 @@ class NutanixMetrics:
             #region vm
             if not vms_list:
                 vmm_client = v4_init_api_client(module='ntnx_vmm_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
-                vms_list = v4_get_all_entities(module=ntnx_vmm_py_client,client=vmm_client,function='list_vms',limit=limit,module_entity_api='VmApi')
+                # Optimized: Select only necessary fields to reduce payload size
+                vms_list = v4_get_all_entities(module=ntnx_vmm_py_client,client=vmm_client,function='list_vms',limit=limit,module_entity_api='VmApi',select='extId,name,powerState,bootConfig,gpus,protectionType,numSockets,numCoresPerSocket,memorySizeBytes,disks,nics,guestTools,cluster,host')
             for host in host_list:
                 powered_on_vms_list= [vm for vm in vms_list if vm.power_state == 'ON']
                 host_vms_list= [vm for vm in powered_on_vms_list if vm.host.ext_id == host.ext_id]
@@ -1123,8 +1260,10 @@ class NutanixMetrics:
 
         #region #?storage_containers
         if self.storage_containers_metrics:
+            _endpoint_start = time.time()
             if not storage_container_list:
-                storage_container_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_storage_containers',limit=limit,module_entity_api='StorageContainersApi')
+                # Optimized: Select only necessary fields to reduce payload size (includes name and clusterName for stats section)
+                storage_container_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_storage_containers',limit=limit,module_entity_api='StorageContainersApi',select='extId,name,isEncrypted,replicationFactor,clusterExtId,clusterName')
 
             #region stats
             #* get metrics for each storage container
@@ -1175,21 +1314,33 @@ class NutanixMetrics:
                 #print(metric)
                 key, entity, value = metric.split(':')
                 #print(f"key: {key}, entity: {entity}, value: {value}")
-                storage_container_cluster = next(iter([storage_container['parent_name'] for storage_container in storage_container_details_list if storage_container['entity_name'] == entity]))
+                # Find the storage container's cluster name, with fallback if not found
+                matching_containers = [storage_container['parent_name'] for storage_container in storage_container_details_list if storage_container['entity_name'] == entity]
+                if matching_containers:
+                    storage_container_cluster = matching_containers[0]
+                else:
+                    # Fallback: use entity name if cluster name not found (shouldn't happen, but prevents StopIteration)
+                    storage_container_cluster = entity
                 entity = f"{storage_container_cluster}_{entity}"
                 entity = entity.replace(".","_")
                 entity = entity.replace("-","_")
                 self.__dict__[key].labels(storage_container=entity).set(value)
+            endpoint_timings['Storage Container Stats'] = time.time() - _endpoint_start
+            register_endpoint('Storage Container Stats')
             #endregion stats
         #endregion #?storage_containers
 
         #region #?disks
         if self.disks_metrics:
+            _endpoint_start = time.time()
             if not disk_list:
                 disk_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_disks',limit=limit,module_entity_api='DisksApi')
 
             #region stats
             #* get metrics for each disk
+            # Note: The Nutanix API does not provide a bulk list_disk_stats endpoint like it does for VMs.
+            # We must use individual get_disk_stats calls for each disk. The ThreadPoolExecutor with
+            # max_workers=10 provides concurrent processing to optimize this limitation.
             disk_details_list = []
             metrics=[]
             error_list=[]
@@ -1237,6 +1388,8 @@ class NutanixMetrics:
                 key, entity, value = metric.split(':')
                 #print(f"key: {key}, entity: {entity}, value: {value}")
                 self.__dict__[key].labels(disk=entity).set(value)
+            endpoint_timings['Disk Stats'] = time.time() - _endpoint_start
+            register_endpoint('Disk Stats')
             #endregion stats
         #endregion #?disks
 
@@ -1245,12 +1398,14 @@ class NutanixMetrics:
         #todo: deal with rate limits
         #region #?networking
         if self.networking_metrics:
+            _endpoint_start = time.time()
             #* initialize variable for API client configuration
             networking_client = v4_init_api_client(module='ntnx_networking_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
 
             #region #?layer2 stretch
             if not layer2_stretch_list:
-                layer2_stretch_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_layer2_stretches',limit=limit,module_entity_api='Layer2StretchesApi')
+                # Optimized: Select only extId for count-only queries
+                layer2_stretch_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_layer2_stretches',limit=limit,module_entity_api='Layer2StretchesApi',select='extId')
 
             #region stats
             #* get metrics for each layer2 stretch
@@ -1365,7 +1520,8 @@ class NutanixMetrics:
 
             #region #?traffic mirror
             if not traffic_mirrors_list:
-                traffic_mirrors_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_traffic_mirrors',limit=limit,module_entity_api='TrafficMirrorsApi')
+                # Optimized: Select only extId for count-only queries
+                traffic_mirrors_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_traffic_mirrors',limit=limit,module_entity_api='TrafficMirrorsApi',select='extId')
 
             #region stats
             #* get metrics for each traffic mirror
@@ -1422,7 +1578,8 @@ class NutanixMetrics:
 
             #region #?vpc external subnets
             if not vpc_list:
-                vpc_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_vpcs',limit=limit,module_entity_api='VpcsApi')
+                # Optimized: Select only extId for count-only queries
+                vpc_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_vpcs',limit=limit,module_entity_api='VpcsApi',select='extId')
 
             #region stats
             #* get metrics for each vpc external subnets
@@ -1482,7 +1639,8 @@ class NutanixMetrics:
 
             #region #?vpn connections
             if not vpn_connection_list:
-                vpn_connection_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_vpn_connections',limit=limit,module_entity_api='VpnConnectionsApi')
+                # Optimized: Select only extId for count-only queries
+                vpn_connection_list = v4_get_all_entities(module=ntnx_networking_py_client,client=networking_client,function='list_vpn_connections',limit=limit,module_entity_api='VpnConnectionsApi',select='extId')
 
             #region stats
             #* get metrics for each vpn connection
@@ -1536,17 +1694,21 @@ class NutanixMetrics:
                     self.__dict__[key].labels(vpn_connection=entity).set(value)
             #endregion stats
             #endregion #?vpn connections
+            endpoint_timings['Networking Stats'] = time.time() - _endpoint_start
+            register_endpoint('Networking Stats')
 
         #endregion #?networking
 
 
         #region #?vmm
         if self.vm_list != '':
+            _endpoint_start = time.time()
             #* initialize variable for API client configuration
             vmm_client = v4_init_api_client(module='ntnx_vmm_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
 
             if not vms_list:
-                vms_list = v4_get_all_entities(module=ntnx_vmm_py_client,client=vmm_client,function='list_vms',limit=limit,module_entity_api='VmApi')
+                # Optimized: Select only necessary fields to reduce payload size
+                vms_list = v4_get_all_entities(module=ntnx_vmm_py_client,client=vmm_client,function='list_vms',limit=limit,module_entity_api='VmApi',select='extId,name,powerState,bootConfig,gpus,protectionType,numSockets,numCoresPerSocket,memorySizeBytes,disks,nics,guestTools,cluster,host')
 
             #region stats
             if (self.vm_list).lower() == 'all':
@@ -1609,39 +1771,41 @@ class NutanixMetrics:
                                             key_string = key_string.replace("-","_")
                                             self.__dict__[key_string].labels(vm=vm_name).set(metric_data)
             else:
-                vm_list_array = self.vm_list.split(',')
-
-                #* get metrics for each vm
-                vm_details_list = []
-                metrics=[]
+                #* Optimized: Use bulk list_vm_stats API and filter results instead of individual calls
+                vm_list_array = [vm.strip() for vm in self.vm_list.split(',')]
+                
+                # Create a mapping of VM names to UUIDs for filtering
+                vm_name_to_uuid = {vm.name: vm.ext_id for vm in vms_list}
+                requested_vm_uuids = {vm_name_to_uuid.get(vm_name) for vm_name in vm_list_array if vm_name in vm_name_to_uuid}
+                
+                # Use bulk API to fetch all VM stats
+                start_time = (datetime.now(timezone.utc) - timedelta(seconds=150)).isoformat()
+                end_time = (datetime.now(timezone.utc)).isoformat()
+                entity_api = ntnx_vmm_py_client.StatsApi(api_client=vmm_client)
+                response = entity_api.list_vm_stats(_page=0,_limit=1,_startTime=start_time, _endTime=end_time, _samplingInterval=30, _statType='LAST', _select='*')
+                total_available_results=response.metadata.total_available_results
+                page_count = math.ceil(total_available_results/limit)
+                stats_list=[]
                 error_list=[]
-                for entity in vm_list_array:
-                    entity_details = {
-                        'entity_name': entity,
-                        'entity_uuid': next(iter([item.ext_id for item in vms_list if item.name == entity])),
-                    }
-                    vm_details_list.append(entity_details)
-                #print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Processing {len(vm_details_list)} entities...{PrintColors.RESET}")
-                with tqdm.tqdm(total=len(vm_details_list), desc=f"{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching vm metrics") as progress_bar:
+                with tqdm.tqdm(total=page_count, desc=f"{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching vm stats pages") as progress_bar:
                     with ThreadPoolExecutor(max_workers=10) as executor:
                         futures = [executor.submit(
-                                v4_get_entity_stats,
+                                v4_get_all_vm_stats,
                                 client=vmm_client,
-                                module=ntnx_vmm_py_client,
-                                entity_api='StatsApi',
-                                function='get_vm_stats_by_id',
-                                entity=vm,
-                                metric_key_prefix='nutanix_vmm_ahv_stats_vm_',
+                                page=page_number,
+                                limit=limit,
+                                start_time=start_time,
+                                end_time=end_time,
                                 sampling_interval=30,
                                 stat_type='LAST'
-                            ) for vm in vm_details_list]
+                            ) for page_number in range(0, page_count, 1)]
                         for future in as_completed(futures):
                             try:
-                                entities = future.result()
-                                if isinstance(entities, Iterable):
-                                    metrics.extend(entities)
+                                stats = future.result()
+                                if isinstance(stats, Iterable):
+                                    stats_list.extend(stats)
                                 else:
-                                    metrics.append(entities)
+                                    stats_list.append(stats)
                             except ntnx_vmm_py_client.rest.ApiException as e:
                                 error_data = json.loads(e.body)
                                 for error in error_data['data']['error']:
@@ -1654,21 +1818,38 @@ class NutanixMetrics:
                                 progress_bar.update(1)
                 for error in error_list:
                     print(error)
-                for metric in metrics:
-                    #print(metric)
-                    key, entity, value = metric.split(':')
-                    #print(f"key: {key}, entity: {entity}, value: {value}")
-                    self.__dict__[key].labels(vm=entity).set(value)
+                
+                # Filter stats to only include requested VMs and process metrics
+                vm_stats_list = [stat for stat in stats_list if stat is not None and stat.ext_id in requested_vm_uuids]
+                exclude_list = ['timestamp','_reserved','_object_type','_unknown_fields','ext_id','links', 'container_ext_id', 'tenant_id', 'stat_type', 'cluster', 'hypervisor_type']
+                for vm_stat in vm_stats_list:
+                    vm_name = [vm.name for vm in vms_list if vm.ext_id == vm_stat.ext_id]
+                    if vm_name:
+                        for vm_stats_tuple in vm_stat.stats:
+                            stats = vm_stats_tuple.to_dict()
+                            for metric in stats:
+                                if metric is not None:
+                                    if metric not in exclude_list:
+                                        metric_data = stats.get(metric)
+                                        if metric_data is not None:
+                                            key_string = f"nutanix_vmm_ahv_stats_vm_{metric}"
+                                            key_string = key_string.replace(".","_")
+                                            key_string = key_string.replace("-","_")
+                                            self.__dict__[key_string].labels(vm=vm_name).set(metric_data)
+            endpoint_timings['VM Stats'] = time.time() - _endpoint_start
+            register_endpoint('VM Stats')
             #endregion stats
         #endregion #?vmm
 
 
         #region #?files
         if self.files_metrics:
+            _endpoint_start = time.time()
             #* initialize variable for API client configuration
             files_client = v4_init_api_client(module='ntnx_files_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
             if not files_server_list:
-                files_server_list = v4_get_all_entities(module=ntnx_files_py_client,client=files_client,function='list_file_servers',limit=limit,module_entity_api='FileServersApi')
+                # Optimized: Select only extId for count-only queries
+                files_server_list = v4_get_all_entities(module=ntnx_files_py_client,client=files_client,function='list_file_servers',limit=limit,module_entity_api='FileServersApi',select='extId')
 
             #region #?antivirus stats
             #region get entities
@@ -1861,16 +2042,20 @@ class NutanixMetrics:
                     self.__dict__[key].labels(mount_target=entity).set(value)
             #endregion stats
             #endregion #?mount_target stats
+            endpoint_timings['Files Stats'] = time.time() - _endpoint_start
+            register_endpoint('Files Stats')
 
         #endregion #?files
 
 
         #region #?objects
         if self.object_metrics:
+            _endpoint_start = time.time()
             #* initialize variable for API client configuration
             objects_client = v4_init_api_client(module='ntnx_objects_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
             if not object_store_list:
-                object_store_list = v4_get_all_entities(module=ntnx_objects_py_client,client=objects_client,function='list_objectstores',limit=limit,module_entity_api='ObjectStoresApi')
+                # Optimized: Select only extId for count-only queries
+                object_store_list = v4_get_all_entities(module=ntnx_objects_py_client,client=objects_client,function='list_objectstores',limit=limit,module_entity_api='ObjectStoresApi',select='extId')
 
             #region #?object_store stats
             #* get metrics for each files antivirus server
@@ -1923,6 +2108,8 @@ class NutanixMetrics:
                 key, entity, value = metric.split(':')
                 #print(f"key: {key}, entity: {entity}, value: {value}")
                 self.__dict__[key].labels(objectstore=entity).set(value)
+            endpoint_timings['Object Store Stats'] = time.time() - _endpoint_start
+            register_endpoint('Object Store Stats')
             #endregion #?object_store stats
 
         #endregion #?objects
@@ -1930,6 +2117,7 @@ class NutanixMetrics:
 
         #region #?volumes
         if self.volumes_metrics:
+            _endpoint_start = time.time()
             #* initialize variable for API client configuration
             volumes_client = v4_init_api_client(module='ntnx_volumes_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
             if not volume_group_list:
@@ -2092,6 +2280,55 @@ class NutanixMetrics:
             #endregion stats
  """
             #endregion #?volume disks
+            endpoint_timings['Volume Stats'] = time.time() - _endpoint_start
+            register_endpoint('Volume Stats')
+
+        #endregion #?volumes
+
+        #region #?endpoint_timings_summary
+        #generate and display API endpoint timing summary table
+        if endpoint_timings:
+            total_fetch_time = sum(endpoint_timings.values())
+            
+            #print header
+            print(f"\n{PrintColors.DATA}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] API Endpoint Performance Summary{PrintColors.RESET}")
+            
+            #calculate column widths
+            endpoint_col_width = max(len("Endpoint"), max(len(name) for name in endpoint_timings.keys()))
+            time_col_width = len("Time (sec)")
+            percentage_col_width = len("% of Total")
+            # Calculate status column width - need to account for error messages like "10 error(s)"
+            # Calculate all possible status texts to find the maximum width
+            possible_status_texts = ["OK"]
+            for endpoint_name in endpoint_timings.keys():
+                error_count = endpoint_errors.get(endpoint_name, 0)
+                if error_count > 0:
+                    possible_status_texts.append(f"{error_count} error(s)")
+            status_col_width = max(len("Status"), max(len(text) for text in possible_status_texts))
+            
+            #print table header
+            separator = "+" + "-" * (endpoint_col_width + 2) + "+" + "-" * (time_col_width + 2) + "+" + "-" * (percentage_col_width + 2) + "+" + "-" * (status_col_width + 2) + "+"
+            print(f"{PrintColors.DATA}{separator}{PrintColors.RESET}")
+            header_row = f"| {'Endpoint':<{endpoint_col_width}} | {'Time (sec)':<{time_col_width}} | {'% of Total':<{percentage_col_width}} | {'Status':<{status_col_width}} |"
+            print(f"{PrintColors.DATA}{header_row}{PrintColors.RESET}")
+            print(f"{PrintColors.DATA}{separator}{PrintColors.RESET}")
+            
+            #print rows sorted by time (descending)
+            for endpoint_name in sorted(endpoint_timings.keys(), key=lambda x: endpoint_timings[x], reverse=True):
+                elapsed_time = endpoint_timings[endpoint_name]
+                percentage = (elapsed_time / total_fetch_time * 100) if total_fetch_time > 0 else 0
+                error_count = endpoint_errors.get(endpoint_name, 0)
+                status_text = "OK" if error_count == 0 else f"{error_count} error(s)"
+                status_colored = f"{PrintColors.OK}{status_text}{PrintColors.RESET}" if error_count == 0 else f"{PrintColors.WARNING}{status_text}{PrintColors.RESET}"
+                row = f"| {endpoint_name:<{endpoint_col_width}} | {elapsed_time:>{time_col_width}.2f} | {percentage:>{percentage_col_width}.1f} | {status_text:<{status_col_width}} |"
+                print(f"{PrintColors.DATA}{row}{PrintColors.RESET}")
+            
+            #print footer
+            print(f"{PrintColors.DATA}{separator}{PrintColors.RESET}")
+            row = f"| {'TOTAL':<{endpoint_col_width}} | {total_fetch_time:>{time_col_width}.2f} | {100.0:>{percentage_col_width}.1f} | {' ':<{status_col_width}} |"
+            print(f"{PrintColors.OK}{row}{PrintColors.RESET}")
+            print(f"{PrintColors.DATA}{separator}{PrintColors.RESET}\n")
+        #endregion #?endpoint_timings_summary
 
         #endregion #?volumes
 
@@ -3654,16 +3891,14 @@ def v4_get_entities(client,module,entity_api,function,page,limit=50,parent_entit
             response = list_function(_page=page,_limit=limit,_filter=query_filter,_select=select)
         return response
     except module.rest.ApiException as e:
-        error_status = f"HTTP {e.status}" if hasattr(e, 'status') else "Unknown HTTP Status"
-        error_reason = f" - {e.reason}" if hasattr(e, 'reason') else ""
-        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] API Exception in {function} (page {page}): {error_status}{error_reason}{PrintColors.RESET}")
+        # Don't print here - let the caller handle error collection to avoid interrupting progress bars
         raise
     except Exception as e:
-        print(f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Unexpected error in {function} (page {page}): {type(e).__name__}: {str(e)}{PrintColors.RESET}")
+        # Don't print here - let the caller handle error collection to avoid interrupting progress bars
         raise
 
 
-def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_entity_ext_id=None,query_filter=None,select='*'):
+def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_entity_ext_id=None,query_filter=None,select='*',endpoint_errors_dict=None,endpoint_name=None):
     '''v4_get_all_entities function.
         Args:
             client: a v4 Python SDK client object.
@@ -3671,6 +3906,8 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
             entity_api: name of the entity API to use.
             function: name of the function to use.
             limit: number of entities to fetch.
+            endpoint_errors_dict: optional dictionary to update with error count.
+            endpoint_name: optional endpoint name for error tracking.
         Returns:
     '''
 
@@ -3741,7 +3978,7 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
                         except Exception as e:
                             error_message = f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Task failed with {type(e).__name__}: {str(e)} {PrintColors.RESET}"
                             error_list.append(error_message)
-                            print(error_message)
+                            # Don't print here - errors will be displayed after progress bar completes
             else:
                 with tqdm.tqdm(total=page_count, desc=f"{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching pages {function} in {module_entity_api}") as progress_bar:
                     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -3779,7 +4016,7 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
                             except Exception as e:
                                 error_message = f"{PrintColors.FAIL}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [ERROR] Task failed with {type(e).__name__}: {str(e)} {PrintColors.RESET}"
                                 error_list.append(error_message)
-                                print(error_message)
+                                # Don't print here - errors will be displayed after progress bar completes
                             finally:
                                 progress_bar.update(1)
     else:
@@ -3790,6 +4027,9 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
         print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [SUMMARY] {function} had {len(error_list)} error(s):{PrintColors.RESET}")
         for error in error_list:
             print(error)
+        # Update endpoint_errors if provided
+        if endpoint_errors_dict is not None and endpoint_name is not None:
+            endpoint_errors_dict[endpoint_name] = len(error_list)
     
     if entity_list:
         print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] {function} fetched {len(entity_list)} entities successfully{PrintColors.RESET}")
@@ -4192,6 +4432,52 @@ def main():
     ipmi_config = json.loads(os.getenv('IPMI_CONFIG', '[]'))
 
     operations_mode_env = os.getenv('OPERATIONS_MODE',default='v4')
+
+    # Display configuration summary
+    print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Configuration Summary{PrintColors.RESET}")
+    print(f"{PrintColors.OK}{'='*80}{PrintColors.RESET}")
+    
+    # Prism Server Information
+    prism_server = os.getenv('PRISM', 'Not Set')
+    prism_username = os.getenv('PRISM_USERNAME', 'Not Set')
+    print(f"{PrintColors.OK}Prism Server: {prism_server}:{app_port}{PrintColors.RESET}")
+    print(f"{PrintColors.OK}Prism Username: {prism_username}{PrintColors.RESET}")
+    print(f"{PrintColors.OK}Prism Secure: {prism_secure}{PrintColors.RESET}")
+    print(f"{PrintColors.OK}Operations Mode: {operations_mode_env}{PrintColors.RESET}")
+    print(f"{PrintColors.OK}{'-'*80}{PrintColors.RESET}")
+    
+    # Metrics Configuration
+    print(f"{PrintColors.OK}Metrics Configuration:{PrintColors.RESET}")
+    metrics_status = []
+    metrics_status.append(('Cluster Metrics', cluster_metrics))
+    metrics_status.append(('Storage Containers Metrics', storage_containers_metrics))
+    metrics_status.append(('Disks Metrics', disks_metrics))
+    metrics_status.append(('IPMI Metrics', ipmi_metrics))
+    metrics_status.append(('Prism Central Metrics', prism_central_metrics))
+    metrics_status.append(('Networking Metrics', networking_metrics))
+    metrics_status.append(('Microseg Metrics', microseg_metrics))
+    metrics_status.append(('Files Metrics', files_metrics))
+    metrics_status.append(('Object Metrics', object_metrics))
+    metrics_status.append(('Volumes Metrics', volumes_metrics))
+    metrics_status.append(('Hosts Metrics', hosts_metrics))
+    metrics_status.append(('NCM SSP Metrics', ncm_ssp_metrics))
+    
+    for metric_name, is_enabled in metrics_status:
+        status = f"{PrintColors.OK}✓ Enabled{PrintColors.RESET}" if is_enabled else f"{PrintColors.WARNING}✗ Disabled{PrintColors.RESET}"
+        print(f"  {metric_name}: {status}")
+
+    # Additional Configuration
+    if operations_mode_env == 'v4':
+        print(f"{PrintColors.OK}{'-'*80}{PrintColors.RESET}")
+        print(f"{PrintColors.OK}Additional Settings:{PrintColors.RESET}")
+        vm_list = os.getenv('VM_LIST', 'all')
+        print(f"  VM List: {vm_list}")
+        print(f"  Show Stats Only: {show_stats_only}")
+        if ipmi_metrics:
+            print(f"  IPMI Additional Metrics: {ipmi_additional_metrics}")
+            print(f"  IPMI Secure: {ipmi_secure}")
+    
+    print(f"{PrintColors.OK}{'='*80}{PrintColors.RESET}")
 
     if operations_mode_env == 'legacy':
         print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Initializing metrics class...{PrintColors.RESET}")
