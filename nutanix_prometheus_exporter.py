@@ -561,7 +561,7 @@ class NutanixMetrics:
             _endpoint_start = time.time()
             vmm_client = v4_init_api_client(module='ntnx_vmm_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
             # Optimized: Select only necessary fields to reduce payload size
-            vms_list = v4_get_all_entities(module=ntnx_vmm_py_client,client=vmm_client,function='list_vms',limit=limit,module_entity_api='VmApi',select='extId,name,powerState,bootConfig,gpus,protectionType,numSockets,numCoresPerSocket,memorySizeBytes,disks,nics,guestTools,cluster,host',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - VMs')
+            vms_list = v4_get_all_entities(module=ntnx_vmm_py_client,client=vmm_client,function='list_vms',limit=limit,module_entity_api='VmApi',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - VMs')
             self.__dict__["nutanix_count_vm"].labels(entity=prism_central_hostname).set(len(vms_list))
             self.__dict__["nutanix_count_vm_on"].labels(entity=prism_central_hostname).set(len([vm for vm in vms_list if vm.power_state == 'ON']))
             self.__dict__["nutanix_count_vm_off"].labels(entity=prism_central_hostname).set(len([vm for vm in vms_list if vm.power_state == 'OFF']))
@@ -872,19 +872,24 @@ class NutanixMetrics:
 
             endpoint_errors['Recovery Points'] = 0
             _recovery_points_start = time.time()
+            dataprotection_recovery_points_api = ntnx_dataprotection_py_client.RecoveryPointsApi(api_client=dataprotection_client)
             try:
-                recovery_point_list = v4_get_all_entities(module=ntnx_dataprotection_py_client,client=dataprotection_client,function='list_recovery_points',limit=limit,module_entity_api='RecoveryPointsApi',select='recoveryPointType,vmRecoveryPoints,volumeGroupRecoveryPoints',endpoint_errors_dict=endpoint_errors,endpoint_name='Recovery Points')
+                #recovery_point_list = v4_get_all_entities(module=ntnx_dataprotection_py_client,client=dataprotection_client,function='list_recovery_points',limit=limit,module_entity_api='RecoveryPointsApi',endpoint_errors_dict=endpoint_errors,endpoint_name='Recovery Points')
+                with tqdm.tqdm(total=1, desc=f"{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching recovery points count") as progress_bar:
+                    recovery_point_count = dataprotection_recovery_points_api.list_recovery_points(_limit=1).metadata.total_available_results
+                    progress_bar.update(1)
+                    print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] list_recovery_points fetched {recovery_point_count} entities successfully{PrintColors.RESET}")
             except Exception as e:
                 endpoint_errors['Recovery Points'] += 1
                 print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Error fetching Recovery Points: {e}{PrintColors.RESET}")
-                recovery_point_list = []
+                #recovery_point_list = []
             endpoint_timings['Recovery Points'] = time.time() - _recovery_points_start
             register_endpoint('Recovery Points')
-            self.__dict__["nutanix_count_dr_recovery_points"].labels(entity=prism_central_hostname).set(len(recovery_point_list))
-            self.__dict__["nutanix_count_dr_recovery_points_vm"].labels(entity=prism_central_hostname).set(sum([len([vm_recovery_point for vm_recovery_point in recovery_point.vm_recovery_points]) for recovery_point in recovery_point_list if recovery_point and recovery_point.vm_recovery_points]))
-            self.__dict__["nutanix_count_dr_recovery_points_vg"].labels(entity=prism_central_hostname).set(sum([len([vg_recovery_point for vg_recovery_point in recovery_point.volume_group_recovery_points]) for recovery_point in recovery_point_list if recovery_point and recovery_point.volume_group_recovery_points]))
-            self.__dict__["nutanix_count_dr_recovery_points_crash_consistent"].labels(entity=prism_central_hostname).set(len([recovery_point for recovery_point in recovery_point_list if recovery_point and recovery_point.recovery_point_type == 'CRASH_CONSISTENT']))
-            self.__dict__["nutanix_count_dr_recovery_points_application_consistent"].labels(entity=prism_central_hostname).set(len([recovery_point for recovery_point in recovery_point_list if recovery_point and recovery_point.recovery_point_type == 'APPLICATION_CONSISTENT']))
+            self.__dict__["nutanix_count_dr_recovery_points"].labels(entity=prism_central_hostname).set(recovery_point_count)
+            #self.__dict__["nutanix_count_dr_recovery_points_vm"].labels(entity=prism_central_hostname).set(sum([len([vm_recovery_point for vm_recovery_point in recovery_point.vm_recovery_points]) for recovery_point in recovery_point_list if recovery_point and recovery_point.vm_recovery_points]))
+            #self.__dict__["nutanix_count_dr_recovery_points_vg"].labels(entity=prism_central_hostname).set(sum([len([vg_recovery_point for vg_recovery_point in recovery_point.volume_group_recovery_points]) for recovery_point in recovery_point_list if recovery_point and recovery_point.volume_group_recovery_points]))
+            #self.__dict__["nutanix_count_dr_recovery_points_crash_consistent"].labels(entity=prism_central_hostname).set(len([recovery_point for recovery_point in recovery_point_list if recovery_point and recovery_point.recovery_point_type == 'CRASH_CONSISTENT']))
+            #self.__dict__["nutanix_count_dr_recovery_points_application_consistent"].labels(entity=prism_central_hostname).set(len([recovery_point for recovery_point in recovery_point_list if recovery_point and recovery_point.recovery_point_type == 'APPLICATION_CONSISTENT']))
             #endregion data protection
 
             #region microseg
