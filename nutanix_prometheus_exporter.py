@@ -3780,6 +3780,9 @@ def v4_get_entity_stats(client,module,entity_api,function,entity,metric_key_pref
     start_time = (datetime.now(timezone.utc) - timedelta(seconds=150)).isoformat()
     end_time = (datetime.now(timezone.utc)).isoformat()
     if 'entity_parent_uuid' in entity:
+        if entity['entity_parent_uuid'] is None:
+            print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Skipping {function} for entity {entity.get('entity_name','unknown')} — no parent cluster UUID{PrintColors.RESET}")
+            return []
         response = get_stats_function(entity['entity_parent_uuid'],extId=entity['entity_uuid'], _startTime=start_time, _endTime=end_time, _samplingInterval=sampling_interval, _statType=stat_type, _select='*')
     else:
         response = get_stats_function(extId=entity['entity_uuid'], _startTime=start_time, _endTime=end_time, _samplingInterval=sampling_interval, _statType=stat_type, _select='*')
@@ -3852,6 +3855,9 @@ def v4_get_files_analytics_stats(client,module,entity_api,function,entity,metric
     start_time = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
     end_time = (datetime.now(timezone.utc)).isoformat()
     if 'entity_parent_uuid' in entity:
+        if entity['entity_parent_uuid'] is None:
+            print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Skipping {function} for entity {entity.get('entity_name','unknown')} — no parent cluster UUID{PrintColors.RESET}")
+            return []
         response = get_stats_function(entity['entity_parent_uuid'],extId=entity['entity_uuid'], _startTime=start_time, _endTime=end_time, _samplingInterval=sampling_interval, _select='*')
     else:
         response = get_stats_function(extId=entity['entity_uuid'], _startTime=start_time, _endTime=end_time, _samplingInterval=sampling_interval, _select='*')
