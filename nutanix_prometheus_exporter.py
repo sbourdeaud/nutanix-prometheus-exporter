@@ -3685,7 +3685,7 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
         print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] No entities found for {function} in {module_entity_api}!{PrintColors.RESET}")
     for error in error_list:
         print(error)
-    return entity_list
+    return [e for e in entity_list if e is not None]
 
 
 def v4_get_subnets(client,module,entity_api,function,page,limit=50):
@@ -3755,7 +3755,7 @@ def v4_get_all_subnets(client,limit):
         print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] No entities found for list_subnets in SubnetsApi!{PrintColors.RESET}")
     for error in error_list:
         print(error)
-    return entity_list
+    return [e for e in entity_list if e is not None]
 
 
 def v4_get_entity_stats(client,module,entity_api,function,entity,metric_key_prefix,sampling_interval,stat_type):
