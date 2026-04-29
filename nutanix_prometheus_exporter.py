@@ -1101,7 +1101,7 @@ class NutanixMetrics:
                 host_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_hosts',limit=limit,module_entity_api='ClustersApi',select='extId,hostName,cluster')
             for cluster in cluster_list:
                 if 'PRISM_CENTRAL' not in cluster.config.cluster_function:
-                    cluster_hosts_list = [host for host in host_list if host.cluster.uuid == cluster.ext_id]
+                    cluster_hosts_list = [host for host in host_list if host.cluster is not None and host.cluster.uuid == cluster.ext_id]
                     self.__dict__["nutanix_count_node"].labels(entity=cluster.name).set(len(cluster_hosts_list))
             #endregion host
 
@@ -1165,7 +1165,7 @@ class NutanixMetrics:
                 entity_details = {
                     'entity_name': entity.host_name,
                     'entity_uuid': entity.ext_id,
-                    'entity_parent_uuid': entity.cluster.uuid,
+                    'entity_parent_uuid': entity.cluster.uuid if entity.cluster is not None else None,
                 }
                 #print(entity_details)
                 host_details_list.append(entity_details)
@@ -4026,8 +4026,7 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
                                 progress_bar.update(1)
     else:
         print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] No entities found for {function} in {module_entity_api}!{PrintColors.RESET}")
-    
-    # Print error summary if there were any errors
+# Print error summary if there were any errors
     if error_list:
         print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [SUMMARY] {function} had {len(error_list)} error(s):{PrintColors.RESET}")
         for error in error_list:
@@ -4109,7 +4108,7 @@ def v4_get_all_subnets(client,limit):
         print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] No entities found for list_subnets in SubnetsApi!{PrintColors.RESET}")
     for error in error_list:
         print(error)
-    return entity_list
+    return [e for e in entity_list if e is not None]
 
 
 def v4_get_entity_stats(client,module,entity_api,function,entity,metric_key_prefix,sampling_interval,stat_type):
@@ -4134,6 +4133,9 @@ def v4_get_entity_stats(client,module,entity_api,function,entity,metric_key_pref
     start_time = (datetime.now(timezone.utc) - timedelta(seconds=150)).isoformat()
     end_time = (datetime.now(timezone.utc)).isoformat()
     if 'entity_parent_uuid' in entity:
+        if entity['entity_parent_uuid'] is None:
+            print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Skipping {function} for entity {entity.get('entity_name','unknown')} — no parent cluster UUID{PrintColors.RESET}")
+            return []
         response = get_stats_function(entity['entity_parent_uuid'],extId=entity['entity_uuid'], _startTime=start_time, _endTime=end_time, _samplingInterval=sampling_interval, _statType=stat_type, _select='*')
     else:
         response = get_stats_function(extId=entity['entity_uuid'], _startTime=start_time, _endTime=end_time, _samplingInterval=sampling_interval, _statType=stat_type, _select='*')
@@ -4206,6 +4208,9 @@ def v4_get_files_analytics_stats(client,module,entity_api,function,entity,metric
     start_time = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
     end_time = (datetime.now(timezone.utc)).isoformat()
     if 'entity_parent_uuid' in entity:
+        if entity['entity_parent_uuid'] is None:
+            print(f"{PrintColors.WARNING}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [WARNING] Skipping {function} for entity {entity.get('entity_name','unknown')} — no parent cluster UUID{PrintColors.RESET}")
+            return []
         response = get_stats_function(entity['entity_parent_uuid'],extId=entity['entity_uuid'], _startTime=start_time, _endTime=end_time, _samplingInterval=sampling_interval, _select='*')
     else:
         response = get_stats_function(extId=entity['entity_uuid'], _startTime=start_time, _endTime=end_time, _samplingInterval=sampling_interval, _select='*')
@@ -4304,6 +4309,7 @@ def v4_init_api_client(module, prism, user, pwd, prism_secure=False):
 
     api_client_configuration = module.Configuration()
     api_client_configuration.host = prism
+    api_client_configuration.port = 9440
     api_client_configuration.username = user
     api_client_configuration.password = pwd
 
