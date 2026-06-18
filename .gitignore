@@ -174,3 +174,4 @@ cython_debug/
 .pypirc
 /.local/
 .local
+.DS_Store
