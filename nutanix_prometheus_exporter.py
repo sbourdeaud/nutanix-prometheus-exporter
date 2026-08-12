@@ -335,9 +335,12 @@ class NutanixMetrics:
             #endregion count
 
             #other misc info based metrics
-            setattr(self, 'nutanix_cluster', Info('nutanix_cluster', 'Misc cluster information'))
+            setattr(self, 'nutanix_cluster', Gauge('nutanix_cluster_info', 'Misc cluster information', ['entity', 'build_version', 'build_full_version', 'build_type', 'hypervisor_types', 'redundancy_factor', 'cluster_arch', 'fault_tolerance_state', 'fault_tolerance_current', 'fault_tolerance_desired', 'encryption_in_transit_status', 'encryption_option', 'encryption_scope', 'pulse_status', 'pulse_status_is_enabled', 'is_available', 'num_nodes']))
+            setattr(self, 'nutanix_cluster_software_info', Gauge('nutanix_cluster_software_info', 'Cluster software entries', ['entity', 'software', 'version']))
             stats_count += 1
             complete_stats_list['info'].update({'nutanix_cluster': []})
+            stats_count += 1
+            complete_stats_list['info'].update({'nutanix_cluster_software_info': []})
         #endregion #?clusters
 
         #region #?networking
@@ -526,6 +529,37 @@ class NutanixMetrics:
         def register_endpoint(name):
             if name not in endpoint_errors:
                 endpoint_errors[name] = 0
+
+        def normalize_metric_value(value):
+            if value is None:
+                return 'unknown'
+            if hasattr(value, 'value'):
+                return str(value.value)
+            if hasattr(value, 'name'):
+                return str(value.name)
+            return str(value)
+
+        def normalize_metric_list(values):
+            if not values:
+                return 'unknown'
+            normalized_values = []
+            for value in values:
+                normalized_values.append(normalize_metric_value(value))
+            if not normalized_values:
+                return 'unknown'
+            return ','.join(sorted(normalized_values))
+
+        def get_cluster_num_nodes(cluster):
+            nodes_ref = getattr(cluster, 'nodes', None)
+            if nodes_ref is None:
+                return 'unknown'
+            number_of_nodes = getattr(nodes_ref, 'number_of_nodes', None)
+            if number_of_nodes is not None:
+                return str(number_of_nodes)
+            node_list = getattr(nodes_ref, 'node_list', None)
+            if node_list is not None:
+                return str(len(node_list))
+            return 'unknown'
 
         #region #?prism_central
         if self.prism_central_metrics:
@@ -993,7 +1027,67 @@ class NutanixMetrics:
             endpoint_errors['Prism Central - Clusters'] = 0
             _endpoint_start = time.time()
             # Optimized: Select only necessary fields to reduce payload size
-            cluster_list = v4_get_all_entities(module=ntnx_clustermgmt_py_client,client=clustermgmt_client,function='list_clusters',limit=limit,module_entity_api='ClustersApi',select='extId,name,config',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Clusters')
+            cluster_list = v4_get_all_entities(
+                module=ntnx_clustermgmt_py_client,
+                client=clustermgmt_client,
+                function='list_clusters',
+                limit=limit,
+                module_entity_api='ClustersApi',
+                endpoint_errors_dict=endpoint_errors,
+                endpoint_name='Prism Central - Clusters'
+            )
+            for cluster in cluster_list:
+                cluster_name = normalize_metric_value(getattr(cluster, 'name', None))
+                cluster_config = getattr(cluster, 'config', None)
+                fault_tolerance_state = getattr(cluster_config, 'fault_tolerance_state', None)
+                pulse_status = getattr(cluster_config, 'pulse_status', None)
+                cluster_info_labels = {
+                    'entity': cluster_name,
+                    'build_version': normalize_metric_value(getattr(getattr(cluster_config, 'build_info', None), 'version', None)),
+                    'build_full_version': normalize_metric_value(getattr(getattr(cluster_config, 'build_info', None), 'full_version', None)),
+                    'build_type': normalize_metric_value(getattr(getattr(cluster_config, 'build_info', None), 'build_type', None)),
+                    'hypervisor_types': normalize_metric_list(getattr(cluster_config, 'hypervisor_types', [])),
+                    'redundancy_factor': normalize_metric_value(getattr(cluster_config, 'redundancy_factor', None)),
+                    'cluster_arch': normalize_metric_value(getattr(cluster_config, 'cluster_arch', None)),
+                    'fault_tolerance_state': normalize_metric_value(getattr(fault_tolerance_state, 'domain_awareness_level', None)),
+                    'fault_tolerance_current': normalize_metric_value(getattr(fault_tolerance_state, 'current_cluster_fault_tolerance', None)),
+                    'fault_tolerance_desired': normalize_metric_value(getattr(fault_tolerance_state, 'desired_cluster_fault_tolerance', None)),
+                    'encryption_in_transit_status': normalize_metric_value(getattr(cluster_config, 'encryption_in_transit_status', None)),
+                    'encryption_option': normalize_metric_list(getattr(cluster_config, 'encryption_option', [])),
+                    'encryption_scope': normalize_metric_list(getattr(cluster_config, 'encryption_scope', [])),
+                    'pulse_status': normalize_metric_value(getattr(pulse_status, '_object_type', None)),
+                    'pulse_status_is_enabled': normalize_metric_value(getattr(pulse_status, 'is_enabled', None)),
+                    'is_available': normalize_metric_value(getattr(cluster_config, 'is_available', None)),
+                    'num_nodes': get_cluster_num_nodes(cluster)
+                }
+                self.__dict__["nutanix_cluster"].labels(
+                    entity=cluster_info_labels['entity'],
+                    build_version=cluster_info_labels['build_version'],
+                    build_full_version=cluster_info_labels['build_full_version'],
+                    build_type=cluster_info_labels['build_type'],
+                    hypervisor_types=cluster_info_labels['hypervisor_types'],
+                    redundancy_factor=cluster_info_labels['redundancy_factor'],
+                    cluster_arch=cluster_info_labels['cluster_arch'],
+                    fault_tolerance_state=cluster_info_labels['fault_tolerance_state'],
+                    fault_tolerance_current=cluster_info_labels['fault_tolerance_current'],
+                    fault_tolerance_desired=cluster_info_labels['fault_tolerance_desired'],
+                    encryption_in_transit_status=cluster_info_labels['encryption_in_transit_status'],
+                    encryption_option=cluster_info_labels['encryption_option'],
+                    encryption_scope=cluster_info_labels['encryption_scope'],
+                    pulse_status=cluster_info_labels['pulse_status'],
+                    pulse_status_is_enabled=cluster_info_labels['pulse_status_is_enabled'],
+                    is_available=cluster_info_labels['is_available'],
+                    num_nodes=cluster_info_labels['num_nodes']
+                ).set(1)
+
+                for software_entry in getattr(cluster_config, 'cluster_software_map', []) or []:
+                    software_name = normalize_metric_value(getattr(software_entry, 'software_type', None))
+                    software_version = normalize_metric_value(getattr(software_entry, 'version', None))
+                    self.__dict__["nutanix_cluster_software_info"].labels(
+                        entity=cluster_name,
+                        software=software_name,
+                        version=software_version
+                    ).set(1)
             # Set cluster count metric
             self.__dict__["nutanix_count_cluster"].labels(entity=prism_central_hostname).set(len([cluster for cluster in cluster_list if 'PRISM_CENTRAL' not in cluster.config.cluster_function]))
 
@@ -3874,7 +3968,7 @@ def v4_api_call_with_retry(api_function, parent_entity_ext_id=None, max_retries=
             retries_left -= 1
 
 
-def v4_get_entities(client,module,entity_api,function,page,limit=50,parent_entity_ext_id=None,query_filter=None,select='*'):
+def v4_get_entities(client,module,entity_api,function,page,limit=50,parent_entity_ext_id=None,query_filter=None,select=None):
 
     '''v4_get_entities function.
         Args:
@@ -3891,9 +3985,15 @@ def v4_get_entities(client,module,entity_api,function,page,limit=50,parent_entit
     list_function = getattr(entity_api, function)
     try:
         if parent_entity_ext_id is not None:
-            response = list_function(parent_entity_ext_id,_page=page,_limit=limit,_filter=query_filter,_select=select)
+            if select is not None:
+                response = list_function(parent_entity_ext_id,_page=page,_limit=limit,_filter=query_filter,_select=select)
+            else:
+                response = list_function(parent_entity_ext_id,_page=page,_limit=limit,_filter=query_filter)
         else:
-            response = list_function(_page=page,_limit=limit,_filter=query_filter,_select=select)
+            if select is not None:
+                response = list_function(_page=page,_limit=limit,_filter=query_filter,_select=select)
+            else:
+                response = list_function(_page=page,_limit=limit,_filter=query_filter)
         return response
     except module.rest.ApiException as e:
         # Don't print here - let the caller handle error collection to avoid interrupting progress bars
@@ -3903,7 +4003,7 @@ def v4_get_entities(client,module,entity_api,function,page,limit=50,parent_entit
         raise
 
 
-def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_entity_ext_id=None,query_filter=None,select='*',endpoint_errors_dict=None,endpoint_name=None):
+def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_entity_ext_id=None,query_filter=None,select=None,endpoint_errors_dict=None,endpoint_name=None):
     '''v4_get_all_entities function.
         Args:
             client: a v4 Python SDK client object.
@@ -3926,16 +4026,20 @@ def v4_get_all_entities(module,client,function,limit,module_entity_api,parent_en
     
     # Fetch metadata with retry logic to handle transient errors
     try:
+        metadata_kwargs = {
+            "_page": 0,
+            "_limit": 1,
+            "_filter": query_filter
+        }
+        if select is not None:
+            metadata_kwargs["_select"] = select
         response = v4_api_call_with_retry(
             list_function,
             parent_entity_ext_id=parent_entity_ext_id,
             max_retries=5,
             initial_sleep_seconds=2,
             backoff_multiplier=2,
-            _page=0,
-            _limit=1,
-            _filter=query_filter,
-            _select=select
+            **metadata_kwargs
         )
     except Exception as e:
         error_status = f"HTTP {e.status}" if hasattr(e, 'status') else "Unknown Status"
