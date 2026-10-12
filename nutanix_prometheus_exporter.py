@@ -47,6 +47,8 @@ import threading
 from humanfriendly import format_timespan
 from prometheus_client import start_http_server, Gauge, Info
 
+from storage_container_labels import format_storage_container_label
+
 import ntnx_vmm_py_client
 import ntnx_clustermgmt_py_client
 import ntnx_networking_py_client
@@ -1454,7 +1456,11 @@ class NutanixMetrics:
             #print(f"{PrintColors.OK}{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [INFO] Processing {len(storage_container_details_list)} entities...{PrintColors.RESET}")
             with tqdm.tqdm(total=len(storage_container_details_list), desc=f"{(datetime.now()).strftime('%Y-%m-%d %H:%M:%S')} [DATA] Fetching storage containers metrics") as progress_bar:
                 with ThreadPoolExecutor(max_workers=10) as executor:
-                    futures = [executor.submit(
+                    # Map each future to its container detail so parent_name (cluster) is kept
+                    # with the result. Looking up cluster by container name alone collapses
+                    # same-named containers across clusters into one series (issue #10).
+                    future_to_detail = {
+                        executor.submit(
                             v4_get_entity_stats,
                             client=clustermgmt_client,
                             module=ntnx_clustermgmt_py_client,
@@ -1465,14 +1471,17 @@ class NutanixMetrics:
                             sampling_interval=30,
                             stat_type='LAST',
                             endpoint_name='Storage Container Stats'
-                        ) for storage_container in storage_container_details_list]
-                    for future in as_completed(futures):
+                        ): storage_container
+                        for storage_container in storage_container_details_list
+                    }
+                    for future in as_completed(future_to_detail):
                         try:
                             entities = future.result()
+                            owner = future_to_detail[future]['parent_name']
                             if isinstance(entities, Iterable):
-                                metrics.extend(entities)
+                                metrics.extend((owner, m) for m in entities)
                             else:
-                                metrics.append(entities)
+                                metrics.append((owner, entities))
                         except ntnx_clustermgmt_py_client.rest.ApiException as e:
                             error_data = json.loads(e.body)
                             for error in error_data['data']['error']:
@@ -1485,20 +1494,11 @@ class NutanixMetrics:
                             progress_bar.update(1)
             for error in error_list:
                 print(error)
-            for metric in metrics:
+            for storage_container_cluster, metric in metrics:
                 #print(metric)
                 key, entity, value = metric.split(':')
                 #print(f"key: {key}, entity: {entity}, value: {value}")
-                # Find the storage container's cluster name, with fallback if not found
-                matching_containers = [storage_container['parent_name'] for storage_container in storage_container_details_list if storage_container['entity_name'] == entity]
-                if matching_containers:
-                    storage_container_cluster = matching_containers[0]
-                else:
-                    # Fallback: use entity name if cluster name not found (shouldn't happen, but prevents StopIteration)
-                    storage_container_cluster = entity
-                entity = f"{storage_container_cluster}_{entity}"
-                entity = entity.replace(".","_")
-                entity = entity.replace("-","_")
+                entity = format_storage_container_label(storage_container_cluster, entity)
                 self.__dict__[key].labels(storage_container=entity).set(value)
             endpoint_timings['Storage Container Stats'] = time.time() - _endpoint_start
             register_endpoint('Storage Container Stats')
