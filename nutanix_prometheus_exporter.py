@@ -640,7 +640,7 @@ class NutanixMetrics:
                     _endpoint_start = time.time()
                     volumes_client = v4_init_api_client(module='ntnx_volumes_py_client', prism=self.prism, user=self.user, pwd=self.pwd, prism_secure=self.prism_secure)
                     # Optimized: Select only necessary fields to reduce payload size
-                    volume_group_list = v4_get_all_entities(module=ntnx_volumes_py_client,client=volumes_client,function='list_volume_groups',limit=limit,module_entity_api='VolumeGroupsApi',select='extId,sharingStatus',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Volume Groups')
+                    volume_group_list = v4_get_all_entities(module=ntnx_volumes_py_client,client=volumes_client,function='list_volume_groups',limit=limit,module_entity_api='VolumeGroupsApi',select='extId,name,sharingStatus,clusterReference',endpoint_errors_dict=endpoint_errors,endpoint_name='Prism Central - Volume Groups')
                     self.__dict__["nutanix_count_vg"].labels(entity=prism_central_hostname).set(len(volume_group_list))
                     self.__dict__["nutanix_count_vg_shared"].labels(entity=prism_central_hostname).set(len([vg for vg in volume_group_list if getattr(vg, "sharing_status", None) == 'SHARED']))
                     self.__dict__["nutanix_count_vg_not_shared"].labels(entity=prism_central_hostname).set(len([vg for vg in volume_group_list if getattr(vg, "sharing_status", None) == 'NOT_SHARED']))
