@@ -1164,7 +1164,8 @@ class NutanixMetrics:
                         version=software_version
                     ).set(1)
             # Set cluster count metric
-            self.__dict__["nutanix_count_cluster"].labels(entity=prism_central_hostname).set(len([cluster for cluster in cluster_list if 'PRISM_CENTRAL' not in cluster.config.cluster_function]))
+            if self.prism_central_metrics:
+                self.__dict__["nutanix_count_cluster"].labels(entity=prism_central_hostname).set(len([cluster for cluster in cluster_list if 'PRISM_CENTRAL' not in cluster.config.cluster_function]))
 
             #region stats
             #* get metrics for each cluster
